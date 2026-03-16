@@ -11,6 +11,83 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 add_action( 'admin_menu', 'eds_register_admin_page' );
+add_action( 'wp_login', 'eds_auto_adjust_enrollment_on_login', 10, 2 );
+
+function eds_auto_adjust_enrollment_on_login( $user_login, $user ) {
+    $user_id = $user->ID;
+
+    $today_str = current_time( 'Y-m-d' );
+
+    $last_adjusted = get_user_meta( $user_id, '_eds_last_adjusted', true );
+    if ( $last_adjusted === $today_str ) {
+        return;
+    }
+
+    $last_date_str = get_user_meta( $user_id, 'voa_streak_date', true );
+    if ( empty( $last_date_str ) ) {
+        return;
+    }
+
+    $wp_timezone_str = wp_timezone_string();
+    $wp_timezone     = new DateTimeZone( $wp_timezone_str ? $wp_timezone_str : 'UTC' );
+
+    $today     = new DateTime( $today_str, $wp_timezone );
+    $last_date = new DateTime( $last_date_str, $wp_timezone );
+
+    $diff_days = (int) $today->diff( $last_date )->days;
+
+    // diff gives absolute days between the two dates.
+    // missed_days = diff - 1: last active day itself is not a missed day.
+    $missed_days = $diff_days - 1;
+
+    if ( $missed_days < 1 ) {
+        return;
+    }
+
+    if ( ! function_exists( 'learndash_get_users_group_ids' ) || ! function_exists( 'learndash_group_enrolled_courses' ) || ! function_exists( 'ld_update_course_access' ) ) {
+        return;
+    }
+
+    $group_ids = learndash_get_users_group_ids( $user_id );
+    if ( empty( $group_ids ) ) {
+        return;
+    }
+
+    foreach ( $group_ids as $group_id ) {
+        $access_from_key = "group_{$group_id}_access_from";
+        $enrolled_at_key = "learndash_group_{$group_id}_enrolled_at";
+
+        $enrollment = (int) get_user_meta( $user_id, $enrolled_at_key, true );
+        if ( ! $enrollment ) {
+            $enrollment = (int) get_user_meta( $user_id, $access_from_key, true );
+        }
+
+        if ( ! $enrollment ) {
+            continue;
+        }
+
+        $enrollment_dt = new DateTime( '@' . $enrollment );
+        $enrollment_dt->setTimezone( $wp_timezone );
+        $enrollment_dt->modify( "+{$missed_days} days" );
+
+        $date_str     = $enrollment_dt->format( 'Y-m-d' );
+        $new_datetime = new DateTime( "{$date_str} 00:00:00", $wp_timezone );
+        $new_timestamp = $new_datetime->getTimestamp();
+
+        update_user_meta( $user_id, $access_from_key, $new_timestamp );
+        update_user_meta( $user_id, $enrolled_at_key, $new_timestamp );
+
+        $group_courses = learndash_group_enrolled_courses( $group_id );
+        if ( ! empty( $group_courses ) ) {
+            foreach ( $group_courses as $course_id ) {
+                update_user_meta( $user_id, "course_{$course_id}_access_from", $new_timestamp );
+                ld_update_course_access( $user_id, $course_id, false );
+            }
+        }
+    }
+
+    update_user_meta( $user_id, '_eds_last_adjusted', $today_str );
+}
 
 function eds_register_admin_page() {
     add_menu_page(
