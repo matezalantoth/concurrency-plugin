@@ -87,6 +87,7 @@ function eds_auto_adjust_enrollment_on_login( $user_login, $user ) {
     }
 
     update_user_meta( $user_id, '_eds_last_adjusted', $today_str );
+    update_user_meta( $user_id, 'voa_streak_date', $today_str );
 }
 
 function eds_register_admin_page() {
