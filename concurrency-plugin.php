@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Enrollment Date Shifter
  * Description: Shift a LearnDash user's group enrollment date forwards or backwards.
- * Version: 1.0.0
+ * Version: 1.1.0
  * Author: Concurrency
  */
 
@@ -12,6 +12,73 @@ if ( ! defined( 'ABSPATH' ) ) {
 
 add_action( 'admin_menu', 'eds_register_admin_page' );
 add_action( 'wp_login', 'eds_auto_adjust_enrollment_on_login', 10, 2 );
+add_filter( 'learndash_woocommerce_reset_subscription_course_access_from', 'eds_delay_subscription_course_enrollment', 10, 3 );
+add_filter( 'learndash_woocommerce_reset_subscription_group_access_from', 'eds_delay_subscription_group_enrollment', 10, 3 );
+
+function eds_shift_enrollment_timestamp( $timestamp, $direction, $amount, $unit ) {
+    $datetime = new DateTime( '@' . $timestamp );
+    $datetime->setTimezone( wp_timezone() );
+    $datetime->modify( "{$direction}{$amount} {$unit}" );
+
+    if ( $unit === 'days' ) {
+        $datetime->setTime( 0, 0 );
+    }
+
+    return $datetime->getTimestamp();
+}
+
+function eds_set_group_enrollment_timestamp( $user_id, $group_id, $timestamp, $group_courses = null ) {
+    update_user_meta( $user_id, "group_{$group_id}_access_from", $timestamp );
+    update_user_meta( $user_id, "learndash_group_{$group_id}_enrolled_at", $timestamp );
+
+    $group_courses = $group_courses ?? learndash_group_enrolled_courses( $group_id );
+
+    foreach ( (array) $group_courses as $course_id ) {
+        update_user_meta( $user_id, "course_{$course_id}_access_from", $timestamp );
+        ld_update_course_access( $user_id, $course_id, false );
+    }
+}
+
+function eds_subscription_enrollment_timestamp( $subscription ) {
+    $created = $subscription->get_date_created();
+
+    return $created ? eds_shift_enrollment_timestamp( $created->getTimestamp(), '+', 12, 'days' ) : 0;
+}
+
+function eds_delay_subscription_course_enrollment( $reset, $course_id, $subscription ) {
+    if ( ! $reset || ! is_a( $subscription, 'WC_Subscription' ) ) {
+        return $reset;
+    }
+
+    $user_id   = $subscription->get_user_id();
+    $timestamp = eds_subscription_enrollment_timestamp( $subscription );
+
+    if ( ! $user_id || ! $timestamp ) {
+        return $reset;
+    }
+
+    update_user_meta( $user_id, "course_{$course_id}_access_from", $timestamp );
+    ld_update_course_access( $user_id, $course_id, false );
+
+    return false;
+}
+
+function eds_delay_subscription_group_enrollment( $reset, $group_id, $subscription ) {
+    if ( ! $reset || ! is_a( $subscription, 'WC_Subscription' ) ) {
+        return $reset;
+    }
+
+    $user_id   = $subscription->get_user_id();
+    $timestamp = eds_subscription_enrollment_timestamp( $subscription );
+
+    if ( ! $user_id || ! $timestamp ) {
+        return $reset;
+    }
+
+    eds_set_group_enrollment_timestamp( $user_id, $group_id, $timestamp );
+
+    return false;
+}
 
 function eds_auto_adjust_enrollment_on_login( $user_login, $user ) {
     $user_id = $user->ID;
@@ -28,8 +95,7 @@ function eds_auto_adjust_enrollment_on_login( $user_login, $user ) {
         return;
     }
 
-    $wp_timezone_str = wp_timezone_string();
-    $wp_timezone     = new DateTimeZone( $wp_timezone_str ? $wp_timezone_str : 'UTC' );
+    $wp_timezone = wp_timezone();
 
     $today     = new DateTime( $today_str, $wp_timezone );
     $last_date = new DateTime( $last_date_str, $wp_timezone );
@@ -66,24 +132,8 @@ function eds_auto_adjust_enrollment_on_login( $user_login, $user ) {
             continue;
         }
 
-        $enrollment_dt = new DateTime( '@' . $enrollment );
-        $enrollment_dt->setTimezone( $wp_timezone );
-        $enrollment_dt->modify( "+{$missed_days} days" );
-
-        $date_str     = $enrollment_dt->format( 'Y-m-d' );
-        $new_datetime = new DateTime( "{$date_str} 00:00:00", $wp_timezone );
-        $new_timestamp = $new_datetime->getTimestamp();
-
-        update_user_meta( $user_id, $access_from_key, $new_timestamp );
-        update_user_meta( $user_id, $enrolled_at_key, $new_timestamp );
-
-        $group_courses = learndash_group_enrolled_courses( $group_id );
-        if ( ! empty( $group_courses ) ) {
-            foreach ( $group_courses as $course_id ) {
-                update_user_meta( $user_id, "course_{$course_id}_access_from", $new_timestamp );
-                ld_update_course_access( $user_id, $course_id, false );
-            }
-        }
+        $new_timestamp = eds_shift_enrollment_timestamp( $enrollment, '+', $missed_days, 'days' );
+        eds_set_group_enrollment_timestamp( $user_id, $group_id, $new_timestamp );
     }
 
     update_user_meta( $user_id, '_eds_last_adjusted', $today_str );
@@ -155,33 +205,12 @@ function eds_handle_form_submission() {
         return [ 'error' => "No enrollment timestamp found for {$email} in group {$group_id}." ];
     }
 
-    $wp_timezone_str = wp_timezone_string();
-    $wp_timezone     = new DateTimeZone( $wp_timezone_str ? $wp_timezone_str : 'UTC' );
-
-    $datetime = new DateTime( '@' . $enrollment );
-    $datetime->setTimezone( $wp_timezone );
-
-    $modify_str = "{$direction}{$amount} {$unit}";
-    $datetime->modify( $modify_str );
-
-    if ( $unit === 'days' ) {
-        $date_str    = $datetime->format( 'Y-m-d' );
-        $new_datetime = new DateTime( "{$date_str} 00:00:00", $wp_timezone );
-    } else {
-        $new_datetime = $datetime;
-    }
-
-    $new_enrollment = $new_datetime->getTimestamp();
-
-    update_user_meta( $user_id, $access_from_key, $new_enrollment );
-    update_user_meta( $user_id, $enrolled_at_key, $new_enrollment );
-
-    foreach ( $group_courses as $course_id ) {
-        update_user_meta( $user_id, "course_{$course_id}_access_from", $new_enrollment );
-        ld_update_course_access( $user_id, $course_id, false );
-    }
+    $new_enrollment = eds_shift_enrollment_timestamp( $enrollment, $direction, $amount, $unit );
+    eds_set_group_enrollment_timestamp( $user_id, $group_id, $new_enrollment, $group_courses );
 
     $direction_label = $direction === '+' ? 'forward' : 'backward';
+    $new_datetime = new DateTime( '@' . $new_enrollment );
+    $new_datetime->setTimezone( wp_timezone() );
     $new_date_display = $new_datetime->format( 'Y-m-d H:i:s T' );
 
     return [
