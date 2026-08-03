@@ -37,11 +37,11 @@ $actual       = $GLOBALS['eds_test_meta'][42]['group_7_access_from'];
 
 if (
     $result !== false
-    || gmdate( 'Y-m-d H:i:s', $actual ) !== '2026-03-31 23:00:00'
+    || gmdate( 'Y-m-d H:i:s', $actual ) !== '2026-03-08 00:00:00'
     || $GLOBALS['eds_test_meta'][42]['learndash_group_7_enrolled_at'] !== $actual
     || $GLOBALS['eds_test_meta'][42]['course_101_access_from'] !== $actual
 ) {
-    throw new RuntimeException( 'The 12-day enrollment shift failed.' );
+    throw new RuntimeException( 'The minus-12-day enrollment shift failed.' );
 }
 
 echo "Enrollment shift check passed.\n";
