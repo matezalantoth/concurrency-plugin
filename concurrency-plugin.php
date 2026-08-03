@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Enrollment Date Shifter
  * Description: Shift a LearnDash user's group enrollment date forwards or backwards.
- * Version: 1.1.1
+ * Version: 1.1.0
  * Author: Concurrency
  */
 
@@ -42,7 +42,7 @@ function eds_set_group_enrollment_timestamp( $user_id, $group_id, $timestamp, $g
 function eds_subscription_enrollment_timestamp( $subscription ) {
     $created = $subscription->get_date_created();
 
-    return $created ? eds_shift_enrollment_timestamp( $created->getTimestamp(), '-', 12, 'days' ) : 0;
+    return $created ? eds_shift_enrollment_timestamp( $created->getTimestamp(), '+', 12, 'days' ) : 0;
 }
 
 function eds_delay_subscription_course_enrollment( $reset, $course_id, $subscription ) {
@@ -90,7 +90,7 @@ function eds_auto_adjust_enrollment_on_login( $user_login, $user ) {
         return;
     }
 
-    $last_date_str = get_user_meta( $user_id, '_eds_last_active_date', true );
+    $last_date_str = get_user_meta( $user_id, 'voa_streak_date', true );
     if ( empty( $last_date_str ) ) {
         return;
     }
@@ -137,7 +137,7 @@ function eds_auto_adjust_enrollment_on_login( $user_login, $user ) {
     }
 
     update_user_meta( $user_id, '_eds_last_adjusted', $today_str );
-    update_user_meta( $user_id, '_eds_last_active_date', $today_str );
+    update_user_meta( $user_id, 'voa_streak_date', $today_str );
 }
 
 function eds_register_admin_page() {
