@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Enrollment Date Shifter
  * Description: Shift a LearnDash user's group enrollment date forwards or backwards.
- * Version: 1.1.0
+ * Version: 1.2.0
  * Author: Concurrency
  */
 
@@ -12,8 +12,12 @@ if ( ! defined( 'ABSPATH' ) ) {
 
 add_action( 'admin_menu', 'eds_register_admin_page' );
 add_action( 'wp_login', 'eds_auto_adjust_enrollment_on_login', 10, 2 );
+add_action( 'wp', 'eds_auto_adjust_enrollment_for_current_user' );
 add_filter( 'learndash_woocommerce_reset_subscription_course_access_from', 'eds_delay_subscription_course_enrollment', 10, 3 );
 add_filter( 'learndash_woocommerce_reset_subscription_group_access_from', 'eds_delay_subscription_group_enrollment', 10, 3 );
+
+define( 'EDS_PROGRESS_GROUP_ID', 2528 );
+define( 'EDS_PROGRESS_COURSE_ID', 100 );
 
 function eds_shift_enrollment_timestamp( $timestamp, $direction, $amount, $unit ) {
     $datetime = new DateTime( '@' . $timestamp );
@@ -42,7 +46,7 @@ function eds_set_group_enrollment_timestamp( $user_id, $group_id, $timestamp, $g
 function eds_subscription_enrollment_timestamp( $subscription ) {
     $created = $subscription->get_date_created();
 
-    return $created ? eds_shift_enrollment_timestamp( $created->getTimestamp(), '+', 12, 'days' ) : 0;
+    return $created ? eds_shift_enrollment_timestamp( $created->getTimestamp(), '-', 12, 'days' ) : 0;
 }
 
 function eds_delay_subscription_course_enrollment( $reset, $course_id, $subscription ) {
@@ -81,8 +85,53 @@ function eds_delay_subscription_group_enrollment( $reset, $group_id, $subscripti
 }
 
 function eds_auto_adjust_enrollment_on_login( $user_login, $user ) {
-    $user_id = $user->ID;
+    eds_maybe_align_returning_user( $user->ID );
+}
 
+function eds_auto_adjust_enrollment_for_current_user() {
+    if ( is_user_logged_in() ) {
+        eds_maybe_align_returning_user( get_current_user_id() );
+    }
+}
+
+function eds_get_topic_number( $topic_id ) {
+    return preg_match( '/^\s*(\d+)\s*\./u', get_the_title( $topic_id ), $matches ) ? (int) $matches[1] : 0;
+}
+
+function eds_get_first_incomplete_topic( $user_id, $course_id ) {
+    $topic_ids = (array) learndash_get_course_steps( $course_id, [ 'sfwd-topic' ] );
+    $first_number = $topic_ids ? eds_get_topic_number( $topic_ids[0] ) : 0;
+
+    foreach ( $topic_ids as $index => $topic_id ) {
+        if ( learndash_is_topic_complete( $user_id, $topic_id, $course_id ) ) {
+            continue;
+        }
+
+        $visible_after = absint( learndash_get_setting( $topic_id, 'visible_after' ) );
+        if ( ! $visible_after && $index ) {
+            $topic_number = eds_get_topic_number( $topic_id );
+            $visible_after = $first_number && $topic_number >= $first_number
+                ? $topic_number - $first_number
+                : $index;
+        }
+
+        return [
+            'topic_id'      => (int) $topic_id,
+            'visible_after' => $visible_after,
+        ];
+    }
+
+    return [];
+}
+
+function eds_progress_enrollment_timestamp( $visible_after, $today_str ) {
+    $today = new DateTime( $today_str, wp_timezone() );
+    $today->setTime( 0, 0 );
+
+    return $today->getTimestamp() - ( absint( $visible_after ) * DAY_IN_SECONDS );
+}
+
+function eds_maybe_align_returning_user( $user_id ) {
     $today_str = current_time( 'Y-m-d' );
 
     $last_adjusted = get_user_meta( $user_id, '_eds_last_adjusted', true );
@@ -90,7 +139,14 @@ function eds_auto_adjust_enrollment_on_login( $user_login, $user ) {
         return;
     }
 
-    $last_date_str = get_user_meta( $user_id, 'voa_streak_date', true );
+    $last_date_str = get_user_meta( $user_id, '_eds_last_active_date', true );
+    if ( empty( $last_date_str ) ) {
+        $last_date_str = get_user_meta( $user_id, 'voa_streak_date', true );
+    }
+
+    update_user_meta( $user_id, '_eds_last_adjusted', $today_str );
+    update_user_meta( $user_id, '_eds_last_active_date', $today_str );
+
     if ( empty( $last_date_str ) ) {
         return;
     }
@@ -100,44 +156,54 @@ function eds_auto_adjust_enrollment_on_login( $user_login, $user ) {
     $today     = new DateTime( $today_str, $wp_timezone );
     $last_date = new DateTime( $last_date_str, $wp_timezone );
 
-    $diff_days = (int) $today->diff( $last_date )->days;
+    if ( $last_date >= $today ) {
+        return;
+    }
 
-    // diff gives absolute days between the two dates.
-    // missed_days = diff - 1: last active day itself is not a missed day.
+    $diff_days = (int) $last_date->diff( $today )->days;
+
+    // The last active day itself is not a missed day.
     $missed_days = $diff_days - 1;
 
     if ( $missed_days < 1 ) {
         return;
     }
 
-    if ( ! function_exists( 'learndash_get_users_group_ids' ) || ! function_exists( 'learndash_group_enrolled_courses' ) || ! function_exists( 'ld_update_course_access' ) ) {
+    if (
+        ! function_exists( 'learndash_get_users_group_ids' )
+        || ! function_exists( 'learndash_get_course_steps' )
+        || ! function_exists( 'learndash_is_topic_complete' )
+        || get_post_type( EDS_PROGRESS_COURSE_ID ) !== 'sfwd-courses'
+    ) {
         return;
     }
 
-    $group_ids = learndash_get_users_group_ids( $user_id );
-    if ( empty( $group_ids ) ) {
+    $group_ids = array_map( 'intval', (array) learndash_get_users_group_ids( $user_id ) );
+    if ( ! in_array( EDS_PROGRESS_GROUP_ID, $group_ids, true ) ) {
         return;
     }
 
-    foreach ( $group_ids as $group_id ) {
-        $access_from_key = "group_{$group_id}_access_from";
-        $enrolled_at_key = "learndash_group_{$group_id}_enrolled_at";
-
-        $enrollment = (int) get_user_meta( $user_id, $enrolled_at_key, true );
-        if ( ! $enrollment ) {
-            $enrollment = (int) get_user_meta( $user_id, $access_from_key, true );
-        }
-
-        if ( ! $enrollment ) {
-            continue;
-        }
-
-        $new_timestamp = eds_shift_enrollment_timestamp( $enrollment, '+', $missed_days, 'days' );
-        eds_set_group_enrollment_timestamp( $user_id, $group_id, $new_timestamp );
+    $target = eds_get_first_incomplete_topic( $user_id, EDS_PROGRESS_COURSE_ID );
+    if ( ! $target ) {
+        return;
     }
 
-    update_user_meta( $user_id, '_eds_last_adjusted', $today_str );
-    update_user_meta( $user_id, 'voa_streak_date', $today_str );
+    $old_timestamp = (int) get_user_meta( $user_id, 'course_' . EDS_PROGRESS_COURSE_ID . '_access_from', true );
+    $new_timestamp = eds_progress_enrollment_timestamp( $target['visible_after'], $today_str );
+
+    eds_set_group_enrollment_timestamp( $user_id, EDS_PROGRESS_GROUP_ID, $new_timestamp, [ EDS_PROGRESS_COURSE_ID ] );
+    update_user_meta(
+        $user_id,
+        '_eds_last_progress_alignment',
+        [
+            'course_id'   => EDS_PROGRESS_COURSE_ID,
+            'topic_id'    => $target['topic_id'],
+            'missed_days' => $missed_days,
+            'from'        => $old_timestamp,
+            'to'          => $new_timestamp,
+            'adjusted_at' => time(),
+        ]
+    );
 }
 
 function eds_register_admin_page() {
