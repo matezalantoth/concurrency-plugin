@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Enrollment Date Shifter
  * Description: Shift a LearnDash user's group enrollment date forwards or backwards.
- * Version: 1.2.0
+ * Version: 1.3.0
  * Author: Concurrency
  */
 
@@ -86,11 +86,13 @@ function eds_delay_subscription_group_enrollment( $reset, $group_id, $subscripti
 
 function eds_auto_adjust_enrollment_on_login( $user_login, $user ) {
     eds_maybe_align_returning_user( $user->ID );
+    add_action( 'shutdown', 'eds_store_current_activity' );
 }
 
 function eds_auto_adjust_enrollment_for_current_user() {
     if ( is_user_logged_in() ) {
         eds_maybe_align_returning_user( get_current_user_id() );
+        add_action( 'shutdown', 'eds_store_current_activity' );
     }
 }
 
@@ -98,30 +100,79 @@ function eds_get_topic_number( $topic_id ) {
     return preg_match( '/^\s*(\d+)\s*\./u', get_the_title( $topic_id ), $matches ) ? (int) $matches[1] : 0;
 }
 
-function eds_get_first_incomplete_topic( $user_id, $course_id ) {
+function eds_get_topic_target( $topic_id, $course_id ) {
     $topic_ids = (array) learndash_get_course_steps( $course_id, [ 'sfwd-topic' ] );
-    $first_number = $topic_ids ? eds_get_topic_number( $topic_ids[0] ) : 0;
+    $topic_ids = array_map( 'intval', $topic_ids );
+    $index = array_search( (int) $topic_id, $topic_ids, true );
 
-    foreach ( $topic_ids as $index => $topic_id ) {
-        if ( learndash_is_topic_complete( $user_id, $topic_id, $course_id ) ) {
-            continue;
-        }
-
-        $visible_after = absint( learndash_get_setting( $topic_id, 'visible_after' ) );
-        if ( ! $visible_after && $index ) {
-            $topic_number = eds_get_topic_number( $topic_id );
-            $visible_after = $first_number && $topic_number >= $first_number
-                ? $topic_number - $first_number
-                : $index;
-        }
-
-        return [
-            'topic_id'      => (int) $topic_id,
-            'visible_after' => $visible_after,
-        ];
+    if ( false === $index ) {
+        return [];
     }
 
-    return [];
+    $first_number = $topic_ids ? eds_get_topic_number( $topic_ids[0] ) : 0;
+    $visible_after = absint( learndash_get_setting( $topic_id, 'visible_after' ) );
+
+    if ( ! $visible_after && $index ) {
+        $topic_number = eds_get_topic_number( $topic_id );
+        $visible_after = $first_number && $topic_number >= $first_number
+            ? $topic_number - $first_number
+            : $index;
+    }
+
+    return [
+        'topic_id'      => (int) $topic_id,
+        'visible_after' => $visible_after,
+    ];
+}
+
+function eds_get_previous_activity( $user_id ) {
+    $activity = get_user_meta( $user_id, '_eds_previous_activity', true );
+    $activity = is_array( $activity ) ? $activity : [];
+
+    if ( empty( $activity['date'] ) ) {
+        $activity['date'] = get_user_meta( $user_id, '_eds_last_active_date', true );
+    }
+    if ( empty( $activity['date'] ) ) {
+        $activity['date'] = get_user_meta( $user_id, 'voa_streak_date', true );
+    }
+    if ( empty( $activity['topic_id'] ) && function_exists( 'learndash_user_course_last_step' ) ) {
+        $activity['topic_id'] = learndash_user_course_last_step( $user_id, EDS_PROGRESS_COURSE_ID );
+    }
+
+    return [
+        'date'     => $activity['date'] ?? '',
+        'topic_id' => absint( $activity['topic_id'] ?? 0 ),
+    ];
+}
+
+function eds_store_current_activity() {
+    if ( ! is_user_logged_in() ) {
+        return;
+    }
+
+    $user_id = get_current_user_id();
+    $previous = eds_get_previous_activity( $user_id );
+    $topic_id = function_exists( 'learndash_user_course_last_step' )
+        ? absint( learndash_user_course_last_step( $user_id, EDS_PROGRESS_COURSE_ID ) )
+        : 0;
+
+    if (
+        ! $topic_id
+        || get_post_type( $topic_id ) !== 'sfwd-topic'
+        || (int) learndash_get_course_id( $topic_id ) !== EDS_PROGRESS_COURSE_ID
+    ) {
+        $topic_id = $previous['topic_id'];
+    }
+
+    update_user_meta(
+        $user_id,
+        '_eds_previous_activity',
+        [
+            'date'        => current_time( 'Y-m-d' ),
+            'topic_id'    => $topic_id,
+            'recorded_at' => time(),
+        ]
+    );
 }
 
 function eds_progress_enrollment_timestamp( $visible_after, $today_str ) {
@@ -139,15 +190,12 @@ function eds_maybe_align_returning_user( $user_id ) {
         return;
     }
 
-    $last_date_str = get_user_meta( $user_id, '_eds_last_active_date', true );
-    if ( empty( $last_date_str ) ) {
-        $last_date_str = get_user_meta( $user_id, 'voa_streak_date', true );
-    }
+    $previous_activity = eds_get_previous_activity( $user_id );
+    $last_date_str = $previous_activity['date'];
 
     update_user_meta( $user_id, '_eds_last_adjusted', $today_str );
-    update_user_meta( $user_id, '_eds_last_active_date', $today_str );
 
-    if ( empty( $last_date_str ) ) {
+    if ( empty( $last_date_str ) || empty( $previous_activity['topic_id'] ) ) {
         return;
     }
 
@@ -172,7 +220,6 @@ function eds_maybe_align_returning_user( $user_id ) {
     if (
         ! function_exists( 'learndash_get_users_group_ids' )
         || ! function_exists( 'learndash_get_course_steps' )
-        || ! function_exists( 'learndash_is_topic_complete' )
         || get_post_type( EDS_PROGRESS_COURSE_ID ) !== 'sfwd-courses'
     ) {
         return;
@@ -183,7 +230,7 @@ function eds_maybe_align_returning_user( $user_id ) {
         return;
     }
 
-    $target = eds_get_first_incomplete_topic( $user_id, EDS_PROGRESS_COURSE_ID );
+    $target = eds_get_topic_target( $previous_activity['topic_id'], EDS_PROGRESS_COURSE_ID );
     if ( ! $target ) {
         return;
     }

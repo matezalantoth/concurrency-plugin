@@ -18,6 +18,9 @@ function learndash_group_enrolled_courses() {
 function update_user_meta( $user_id, $key, $value ) {
     $GLOBALS['eds_test_meta'][ $user_id ][ $key ] = $value;
 }
+function get_user_meta( $user_id, $key ) {
+    return $GLOBALS['eds_test_meta'][ $user_id ][ $key ] ?? '';
+}
 function ld_update_course_access() {}
 function get_the_title( $topic_id ) {
     return [ 201 => '13. First', 202 => '14. Second', 203 => '15. Third' ][ $topic_id ];
@@ -25,14 +28,32 @@ function get_the_title( $topic_id ) {
 function learndash_get_course_steps() {
     return [ 201, 202, 203 ];
 }
-function learndash_is_topic_complete( $user_id, $topic_id ) {
-    return $topic_id < 203;
-}
 function learndash_get_setting() {
     return 0;
 }
 function absint( $value ) {
     return abs( (int) $value );
+}
+function current_time() {
+    return '2026-03-20';
+}
+function learndash_get_users_group_ids() {
+    return [ 2528 ];
+}
+function learndash_user_course_last_step() {
+    return $GLOBALS['eds_test_last_step'] ?? 0;
+}
+function learndash_get_course_id( $topic_id ) {
+    return in_array( $topic_id, [ 201, 202, 203 ], true ) ? 100 : 0;
+}
+function get_post_type( $post_id ) {
+    return $post_id === 100 ? 'sfwd-courses' : 'sfwd-topic';
+}
+function is_user_logged_in() {
+    return true;
+}
+function get_current_user_id() {
+    return 42;
 }
 
 class WC_Subscription {
@@ -60,13 +81,38 @@ if (
     throw new RuntimeException( 'The minus-12-day enrollment shift failed.' );
 }
 
-$target = eds_get_first_incomplete_topic( 42, 100 );
-if ( $target !== [ 'topic_id' => 203, 'visible_after' => 2 ] ) {
-    throw new RuntimeException( 'The progress target lookup failed.' );
+$target = eds_get_topic_target( 202, 100 );
+if ( $target !== [ 'topic_id' => 202, 'visible_after' => 1 ] ) {
+    throw new RuntimeException( 'The last-accessed topic lookup failed.' );
 }
 
 if ( gmdate( 'Y-m-d H:i:s', eds_progress_enrollment_timestamp( 2, '2026-03-20' ) ) !== '2026-03-18 00:00:00' ) {
     throw new RuntimeException( 'The progress enrollment alignment failed.' );
+}
+
+$GLOBALS['eds_test_meta'][42]['_eds_previous_activity'] = [
+    'date'        => '2026-03-17',
+    'topic_id'    => 202,
+    'recorded_at' => 1773705600,
+];
+$GLOBALS['eds_test_meta'][42]['course_100_access_from'] = 1773705600;
+$GLOBALS['eds_test_last_step'] = 203;
+
+eds_maybe_align_returning_user( 42 );
+
+$alignment = $GLOBALS['eds_test_meta'][42]['_eds_last_progress_alignment'];
+if (
+    $alignment['topic_id'] !== 202
+    || $alignment['missed_days'] !== 2
+    || gmdate( 'Y-m-d H:i:s', $alignment['to'] ) !== '2026-03-19 00:00:00'
+) {
+    throw new RuntimeException( 'The previous activity was not used for enrollment alignment.' );
+}
+
+eds_store_current_activity();
+$stored_activity = $GLOBALS['eds_test_meta'][42]['_eds_previous_activity'];
+if ( $stored_activity['date'] !== '2026-03-20' || $stored_activity['topic_id'] !== 203 ) {
+    throw new RuntimeException( 'The current activity snapshot was not stored after alignment.' );
 }
 
 echo "Enrollment shift check passed.\n";
