@@ -38,7 +38,7 @@ function current_time() {
     return '2026-03-20';
 }
 function learndash_get_users_group_ids() {
-    return [ 2528 ];
+    return [ 7, 2528 ];
 }
 function learndash_user_course_last_step() {
     return $GLOBALS['eds_test_last_step'] ?? 0;
@@ -79,6 +79,17 @@ if (
     || $GLOBALS['eds_test_meta'][42]['course_101_access_from'] !== $actual
 ) {
     throw new RuntimeException( 'The minus-12-day enrollment shift failed.' );
+}
+
+if ( ! eds_shift_after_skipped_quiz( [ 'quiz' => 20 ], 42, 101 ) ) {
+    throw new RuntimeException( 'A skipped quiz did not advance the enrollment.' );
+}
+if (
+    gmdate( 'Y-m-d H:i:s', $GLOBALS['eds_test_meta'][42]['group_7_access_from'] ) !== '2026-03-07 00:00:00'
+    || eds_shift_after_purchased_quiz( 20, 42, 101 )
+    || gmdate( 'Y-m-d H:i:s', $GLOBALS['eds_test_meta'][42]['course_101_access_from'] ) !== '2026-03-07 00:00:00'
+) {
+    throw new RuntimeException( 'A skipped quiz was advanced more than once when later purchased.' );
 }
 
 $target = eds_get_topic_target( 202, 100 );

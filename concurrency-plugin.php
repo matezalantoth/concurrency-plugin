@@ -15,6 +15,8 @@ add_action( 'wp_login', 'eds_auto_adjust_enrollment_on_login', 10, 2 );
 add_action( 'wp', 'eds_auto_adjust_enrollment_for_current_user' );
 add_filter( 'learndash_woocommerce_reset_subscription_course_access_from', 'eds_delay_subscription_course_enrollment', 10, 3 );
 add_filter( 'learndash_woocommerce_reset_subscription_group_access_from', 'eds_delay_subscription_group_enrollment', 10, 3 );
+add_action( 'ldoq_quiz_skipped', 'eds_shift_after_skipped_quiz', 10, 3 );
+add_action( 'voap_quiz_purchased', 'eds_shift_after_purchased_quiz', 10, 3 );
 
 define( 'EDS_PROGRESS_GROUP_ID', 2528 );
 define( 'EDS_PROGRESS_COURSE_ID', 100 );
@@ -41,6 +43,69 @@ function eds_set_group_enrollment_timestamp( $user_id, $group_id, $timestamp, $g
         update_user_meta( $user_id, "course_{$course_id}_access_from", $timestamp );
         ld_update_course_access( $user_id, $course_id, false );
     }
+}
+
+function eds_shift_course_enrollment_back_one_day( $user_id, $course_id ) {
+    if ( ! $user_id || ! $course_id || ! function_exists( 'learndash_get_users_group_ids' ) ) {
+        return false;
+    }
+
+    $shifted = false;
+    foreach ( array_map( 'intval', (array) learndash_get_users_group_ids( $user_id ) ) as $group_id ) {
+        $courses = array_map( 'intval', (array) learndash_group_enrolled_courses( $group_id ) );
+        if ( ! in_array( (int) $course_id, $courses, true ) ) {
+            continue;
+        }
+
+        $timestamp = (int) get_user_meta( $user_id, "learndash_group_{$group_id}_enrolled_at", true );
+        $timestamp = $timestamp ?: (int) get_user_meta( $user_id, "group_{$group_id}_access_from", true );
+        if ( $timestamp ) {
+            eds_set_group_enrollment_timestamp( $user_id, $group_id, eds_shift_enrollment_timestamp( $timestamp, '-', 1, 'days' ), $courses );
+            $shifted = true;
+        }
+    }
+
+    if ( $shifted ) {
+        return true;
+    }
+
+    $key       = "course_{$course_id}_access_from";
+    $timestamp = (int) get_user_meta( $user_id, $key, true );
+    if ( ! $timestamp ) {
+        return false;
+    }
+
+    update_user_meta( $user_id, $key, eds_shift_enrollment_timestamp( $timestamp, '-', 1, 'days' ) );
+    ld_update_course_access( $user_id, $course_id, false );
+    return true;
+}
+
+function eds_advance_quiz_checkpoint( $quiz_id, $user_id, $course_id ) {
+    $quiz_id   = absint( $quiz_id );
+    $user_id   = absint( $user_id );
+    $course_id = absint( $course_id );
+    if ( ! $quiz_id || ! $user_id || ! $course_id ) {
+        return false;
+    }
+
+    $advanced = get_user_meta( $user_id, '_eds_quiz_advancements', true );
+    $advanced = is_array( $advanced ) ? $advanced : [];
+    $key      = "{$course_id}:{$quiz_id}";
+    if ( isset( $advanced[ $key ] ) || ! eds_shift_course_enrollment_back_one_day( $user_id, $course_id ) ) {
+        return false;
+    }
+
+    $advanced[ $key ] = time();
+    update_user_meta( $user_id, '_eds_quiz_advancements', $advanced );
+    return true;
+}
+
+function eds_shift_after_skipped_quiz( $attempt, $user_id, $course_id ) {
+    return eds_advance_quiz_checkpoint( $attempt['quiz'] ?? 0, $user_id, $course_id );
+}
+
+function eds_shift_after_purchased_quiz( $quiz_id, $user_id, $course_id ) {
+    return eds_advance_quiz_checkpoint( $quiz_id, $user_id, $course_id );
 }
 
 function eds_subscription_enrollment_timestamp( $subscription ) {
