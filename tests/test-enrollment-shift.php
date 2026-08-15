@@ -126,4 +126,18 @@ if ( $stored_activity['date'] !== '2026-03-20' || $stored_activity['topic_id'] !
     throw new RuntimeException( 'The current activity snapshot was not stored after alignment.' );
 }
 
+// Reviewing an earlier topic keeps the furthest one as the anchor.
+$GLOBALS['eds_test_last_step'] = 201;
+eds_store_current_activity();
+if ( $GLOBALS['eds_test_meta'][42]['_eds_previous_activity']['topic_id'] !== 203 ) {
+    throw new RuntimeException( 'Revisiting an earlier topic moved the progress anchor backwards.' );
+}
+
+// A topic outside the course cannot displace the anchor either.
+$GLOBALS['eds_test_last_step'] = 999;
+eds_store_current_activity();
+if ( $GLOBALS['eds_test_meta'][42]['_eds_previous_activity']['topic_id'] !== 203 ) {
+    throw new RuntimeException( 'An unrelated topic moved the progress anchor.' );
+}
+
 echo "Enrollment shift check passed.\n";

@@ -21,6 +21,8 @@ add_action( 'voap_quiz_purchased', 'eds_shift_after_purchased_quiz', 10, 3 );
 define( 'EDS_PROGRESS_GROUP_ID', 2528 );
 define( 'EDS_PROGRESS_COURSE_ID', 100 );
 
+require_once __DIR__ . '/quiz-backfill.php';
+
 function eds_shift_enrollment_timestamp( $timestamp, $direction, $amount, $unit ) {
     $datetime = new DateTime( '@' . $timestamp );
     $datetime->setTimezone( wp_timezone() );
@@ -210,6 +212,13 @@ function eds_get_previous_activity( $user_id ) {
     ];
 }
 
+function eds_topic_drip_day( $topic_id ) {
+    $target = eds_get_topic_target( $topic_id, EDS_PROGRESS_COURSE_ID );
+
+    // Unknown topics rank below everything, so they never displace a known one.
+    return $target ? (int) $target['visible_after'] : -1;
+}
+
 function eds_store_current_activity() {
     if ( ! is_user_logged_in() ) {
         return;
@@ -225,6 +234,16 @@ function eds_store_current_activity() {
         ! $topic_id
         || get_post_type( $topic_id ) !== 'sfwd-topic'
         || (int) learndash_get_course_id( $topic_id ) !== EDS_PROGRESS_COURSE_ID
+    ) {
+        $topic_id = $previous['topic_id'];
+    }
+
+    // learndash_user_course_last_step() is the most recently *visited* step, not the
+    // furthest reached, so revisiting an earlier topic must not drag the anchor back.
+    if (
+        $topic_id !== $previous['topic_id']
+        && $previous['topic_id']
+        && eds_topic_drip_day( $topic_id ) <= eds_topic_drip_day( $previous['topic_id'] )
     ) {
         $topic_id = $previous['topic_id'];
     }
