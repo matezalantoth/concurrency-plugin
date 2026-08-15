@@ -21,6 +21,8 @@ add_action( 'voap_quiz_purchased', 'eds_shift_after_purchased_quiz', 10, 3 );
 define( 'EDS_PROGRESS_GROUP_ID', 2528 );
 define( 'EDS_PROGRESS_COURSE_ID', 100 );
 
+require_once __DIR__ . '/quiz-backfill.php';
+
 function eds_shift_enrollment_timestamp( $timestamp, $direction, $amount, $unit ) {
     $datetime = new DateTime( '@' . $timestamp );
     $datetime->setTimezone( wp_timezone() );
