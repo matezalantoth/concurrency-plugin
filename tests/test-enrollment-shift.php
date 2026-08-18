@@ -43,6 +43,23 @@ function learndash_get_users_group_ids() {
 function learndash_user_course_last_step() {
     return $GLOBALS['eds_test_last_step'] ?? 0;
 }
+class LDLMS_DB {
+    public static function get_table_name() {
+        return 'wp_learndash_user_activity';
+    }
+}
+function esc_sql( $sql ) {
+    return $sql;
+}
+class EDS_Test_WPDB {
+    public function prepare( $query ) {
+        return $query;
+    }
+    public function get_col() {
+        return $GLOBALS['eds_test_activity'] ?? [];
+    }
+}
+$GLOBALS['wpdb'] = new EDS_Test_WPDB();
 function learndash_get_course_id( $topic_id ) {
     return in_array( $topic_id, [ 201, 202, 203 ], true ) ? 100 : 0;
 }
@@ -115,9 +132,14 @@ $alignment = $GLOBALS['eds_test_meta'][42]['_eds_last_progress_alignment'];
 if (
     $alignment['topic_id'] !== 202
     || $alignment['missed_days'] !== 2
-    || gmdate( 'Y-m-d H:i:s', $alignment['to'] ) !== '2026-03-19 00:00:00'
+    || gmdate( 'Y-m-d H:i:s', $alignment['to'] ) !== '2026-03-18 00:00:00'
 ) {
     throw new RuntimeException( 'The previous activity was not used for enrollment alignment.' );
+}
+
+// Topic 202 is drip day 1 and was already read, so today must be drip day 2: topic 203.
+if ( eds_progress_enrollment_timestamp( 2, '2026-03-20' ) !== $alignment['to'] ) {
+    throw new RuntimeException( 'A returning learner was not given the next letter.' );
 }
 
 eds_store_current_activity();
@@ -138,6 +160,26 @@ $GLOBALS['eds_test_last_step'] = 999;
 eds_store_current_activity();
 if ( $GLOBALS['eds_test_meta'][42]['_eds_previous_activity']['topic_id'] !== 203 ) {
     throw new RuntimeException( 'An unrelated topic moved the progress anchor.' );
+}
+
+// No stored snapshot: the seed takes the furthest letter opened, in any visit order.
+unset( $GLOBALS['eds_test_meta'][42]['_eds_previous_activity'] );
+$GLOBALS['eds_test_last_step'] = 201;
+$GLOBALS['eds_test_activity']  = [ 202, 203, 201 ];
+
+if ( eds_seed_furthest_topic( 42 ) !== 203 ) {
+    throw new RuntimeException( 'The seed did not take the furthest opened topic.' );
+}
+
+// Opened but never marked done still counts, and unrelated topics never win.
+$GLOBALS['eds_test_activity'] = [ 999, 201 ];
+if ( eds_seed_furthest_topic( 42 ) !== 201 ) {
+    throw new RuntimeException( 'A topic outside the course was seeded as the anchor.' );
+}
+
+$GLOBALS['eds_test_activity'] = [ 999 ];
+if ( eds_seed_furthest_topic( 42 ) !== 0 ) {
+    throw new RuntimeException( 'A learner with no course activity got an anchor.' );
 }
 
 echo "Enrollment shift check passed.\n";
