@@ -22,6 +22,7 @@ define( 'EDS_PROGRESS_GROUP_ID', 2528 );
 define( 'EDS_PROGRESS_COURSE_ID', 100 );
 
 require_once __DIR__ . '/quiz-backfill.php';
+require_once __DIR__ . '/activity-seed.php';
 
 function eds_shift_enrollment_timestamp( $timestamp, $direction, $amount, $unit ) {
     $datetime = new DateTime( '@' . $timestamp );
@@ -192,6 +193,46 @@ function eds_get_topic_target( $topic_id, $course_id ) {
     ];
 }
 
+/**
+ * Furthest letter a learner ever opened, from LearnDash's activity log.
+ *
+ * A row lands there when a topic is *opened*, so this also counts letters that were read but never
+ * marked done. It is a superset of both course progress and learndash_user_course_last_step(), and
+ * unlike the latter it does not drag a learner back when they re-read an early letter.
+ */
+function eds_seed_furthest_topic( $user_id ) {
+    global $wpdb;
+
+    if ( ! class_exists( 'LDLMS_DB' ) ) {
+        return 0;
+    }
+
+    $topic_ids = $wpdb->get_col(
+        $wpdb->prepare(
+            'SELECT DISTINCT post_id FROM ' . esc_sql( LDLMS_DB::get_table_name( 'user_activity' ) )
+            . ' WHERE user_id = %d AND course_id = %d AND activity_type = %s',
+            $user_id,
+            EDS_PROGRESS_COURSE_ID,
+            'topic'
+        )
+    );
+
+    return eds_furthest_of( (array) $topic_ids );
+}
+
+/** The topic with the highest drip day, or 0 when none of them belong to the course. */
+function eds_furthest_of( $topic_ids ) {
+    $furthest = 0;
+
+    foreach ( array_map( 'intval', $topic_ids ) as $topic_id ) {
+        if ( eds_topic_drip_day( $topic_id ) > eds_topic_drip_day( $furthest ) ) {
+            $furthest = $topic_id;
+        }
+    }
+
+    return $furthest;
+}
+
 function eds_get_previous_activity( $user_id ) {
     $activity = get_user_meta( $user_id, '_eds_previous_activity', true );
     $activity = is_array( $activity ) ? $activity : [];
@@ -202,8 +243,8 @@ function eds_get_previous_activity( $user_id ) {
     if ( empty( $activity['date'] ) ) {
         $activity['date'] = get_user_meta( $user_id, 'voa_streak_date', true );
     }
-    if ( empty( $activity['topic_id'] ) && function_exists( 'learndash_user_course_last_step' ) ) {
-        $activity['topic_id'] = learndash_user_course_last_step( $user_id, EDS_PROGRESS_COURSE_ID );
+    if ( empty( $activity['topic_id'] ) ) {
+        $activity['topic_id'] = eds_seed_furthest_topic( $user_id );
     }
 
     return [
@@ -213,10 +254,16 @@ function eds_get_previous_activity( $user_id ) {
 }
 
 function eds_topic_drip_day( $topic_id ) {
-    $target = eds_get_topic_target( $topic_id, EDS_PROGRESS_COURSE_ID );
+    static $days = [];
 
-    // Unknown topics rank below everything, so they never displace a known one.
-    return $target ? (int) $target['visible_after'] : -1;
+    if ( ! isset( $days[ $topic_id ] ) ) {
+        $target = eds_get_topic_target( $topic_id, EDS_PROGRESS_COURSE_ID );
+
+        // Unknown topics rank below everything, so they never displace a known one.
+        $days[ $topic_id ] = $target ? (int) $target['visible_after'] : -1;
+    }
+
+    return $days[ $topic_id ];
 }
 
 function eds_store_current_activity() {
@@ -320,7 +367,8 @@ function eds_maybe_align_returning_user( $user_id ) {
     }
 
     $old_timestamp = (int) get_user_meta( $user_id, 'course_' . EDS_PROGRESS_COURSE_ID . '_access_from', true );
-    $new_timestamp = eds_progress_enrollment_timestamp( $target['visible_after'], $today_str );
+    // The learner already read the anchor letter, so a new day of activity opens the next one.
+    $new_timestamp = eds_progress_enrollment_timestamp( $target['visible_after'] + 1, $today_str );
 
     eds_set_group_enrollment_timestamp( $user_id, EDS_PROGRESS_GROUP_ID, $new_timestamp, [ EDS_PROGRESS_COURSE_ID ] );
     update_user_meta(
