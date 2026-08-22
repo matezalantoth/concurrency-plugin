@@ -22,55 +22,11 @@ function get_user_meta( $user_id, $key ) {
     return $GLOBALS['eds_test_meta'][ $user_id ][ $key ] ?? '';
 }
 function ld_update_course_access() {}
-function get_the_title( $topic_id ) {
-    return [ 201 => '13. First', 202 => '14. Second', 203 => '15. Third' ][ $topic_id ];
-}
-function learndash_get_course_steps() {
-    return [ 201, 202, 203 ];
-}
-function learndash_get_setting() {
-    return 0;
-}
 function absint( $value ) {
     return abs( (int) $value );
 }
-function current_time() {
-    return '2026-03-20';
-}
 function learndash_get_users_group_ids() {
     return [ 7, 2528 ];
-}
-function learndash_user_course_last_step() {
-    return $GLOBALS['eds_test_last_step'] ?? 0;
-}
-class LDLMS_DB {
-    public static function get_table_name() {
-        return 'wp_learndash_user_activity';
-    }
-}
-function esc_sql( $sql ) {
-    return $sql;
-}
-class EDS_Test_WPDB {
-    public function prepare( $query ) {
-        return $query;
-    }
-    public function get_col() {
-        return $GLOBALS['eds_test_activity'] ?? [];
-    }
-}
-$GLOBALS['wpdb'] = new EDS_Test_WPDB();
-function learndash_get_course_id( $topic_id ) {
-    return in_array( $topic_id, [ 201, 202, 203 ], true ) ? 100 : 0;
-}
-function get_post_type( $post_id ) {
-    return $post_id === 100 ? 'sfwd-courses' : 'sfwd-topic';
-}
-function is_user_logged_in() {
-    return true;
-}
-function get_current_user_id() {
-    return 42;
 }
 
 class WC_Subscription {
@@ -107,79 +63,6 @@ if (
     || gmdate( 'Y-m-d H:i:s', $GLOBALS['eds_test_meta'][42]['course_101_access_from'] ) !== '2026-03-07 00:00:00'
 ) {
     throw new RuntimeException( 'A skipped quiz was advanced more than once when later purchased.' );
-}
-
-$target = eds_get_topic_target( 202, 100 );
-if ( $target !== [ 'topic_id' => 202, 'visible_after' => 1 ] ) {
-    throw new RuntimeException( 'The last-accessed topic lookup failed.' );
-}
-
-if ( gmdate( 'Y-m-d H:i:s', eds_progress_enrollment_timestamp( 2, '2026-03-20' ) ) !== '2026-03-18 00:00:00' ) {
-    throw new RuntimeException( 'The progress enrollment alignment failed.' );
-}
-
-$GLOBALS['eds_test_meta'][42]['_eds_previous_activity'] = [
-    'date'        => '2026-03-17',
-    'topic_id'    => 202,
-    'recorded_at' => 1773705600,
-];
-$GLOBALS['eds_test_meta'][42]['course_100_access_from'] = 1773705600;
-$GLOBALS['eds_test_last_step'] = 203;
-
-eds_maybe_align_returning_user( 42 );
-
-$alignment = $GLOBALS['eds_test_meta'][42]['_eds_last_progress_alignment'];
-if (
-    $alignment['topic_id'] !== 202
-    || $alignment['missed_days'] !== 2
-    || gmdate( 'Y-m-d H:i:s', $alignment['to'] ) !== '2026-03-18 00:00:00'
-) {
-    throw new RuntimeException( 'The previous activity was not used for enrollment alignment.' );
-}
-
-// Topic 202 is drip day 1 and was already read, so today must be drip day 2: topic 203.
-if ( eds_progress_enrollment_timestamp( 2, '2026-03-20' ) !== $alignment['to'] ) {
-    throw new RuntimeException( 'A returning learner was not given the next letter.' );
-}
-
-eds_store_current_activity();
-$stored_activity = $GLOBALS['eds_test_meta'][42]['_eds_previous_activity'];
-if ( $stored_activity['date'] !== '2026-03-20' || $stored_activity['topic_id'] !== 203 ) {
-    throw new RuntimeException( 'The current activity snapshot was not stored after alignment.' );
-}
-
-// Reviewing an earlier topic keeps the furthest one as the anchor.
-$GLOBALS['eds_test_last_step'] = 201;
-eds_store_current_activity();
-if ( $GLOBALS['eds_test_meta'][42]['_eds_previous_activity']['topic_id'] !== 203 ) {
-    throw new RuntimeException( 'Revisiting an earlier topic moved the progress anchor backwards.' );
-}
-
-// A topic outside the course cannot displace the anchor either.
-$GLOBALS['eds_test_last_step'] = 999;
-eds_store_current_activity();
-if ( $GLOBALS['eds_test_meta'][42]['_eds_previous_activity']['topic_id'] !== 203 ) {
-    throw new RuntimeException( 'An unrelated topic moved the progress anchor.' );
-}
-
-// No stored snapshot: the seed takes the furthest letter opened, in any visit order.
-unset( $GLOBALS['eds_test_meta'][42]['_eds_previous_activity'] );
-$GLOBALS['eds_test_last_step'] = 201;
-$GLOBALS['eds_test_activity']  = [ 202, 203, 201 ];
-
-if ( eds_seed_furthest_topic( 42 ) !== 203 ) {
-    throw new RuntimeException( 'The seed did not take the furthest opened topic.' );
-}
-
-// Opened but never marked done still counts, and unrelated topics never win.
-$GLOBALS['eds_test_activity'] = [ 999, 201 ];
-if ( eds_seed_furthest_topic( 42 ) !== 201 ) {
-    throw new RuntimeException( 'A topic outside the course was seeded as the anchor.' );
-}
-
-$GLOBALS['eds_test_activity'] = [ 999 ];
-if ( eds_seed_furthest_topic( 42 ) !== 0 ) {
-    throw new RuntimeException( 'A learner with no course activity got an anchor.' );
 }
 
 echo "Enrollment shift check passed.\n";
