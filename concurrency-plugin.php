@@ -1,8 +1,8 @@
 <?php
 /**
  * Plugin Name: Enrollment Date Shifter
- * Description: Shift a LearnDash user's group enrollment date forwards or backwards.
- * Version: 1.3.0
+ * Description: Shift a LearnDash user's enrollment dates, and advance them as quiz checkpoints are cleared.
+ * Version: 1.4.0
  * Author: Concurrency
  */
 
@@ -32,44 +32,73 @@ function eds_shift_enrollment_timestamp( $timestamp, $direction, $amount, $unit 
     return $datetime->getTimestamp();
 }
 
-function eds_set_group_enrollment_timestamp( $user_id, $group_id, $timestamp, $group_courses = null ) {
-    update_user_meta( $user_id, "group_{$group_id}_access_from", $timestamp );
-    update_user_meta( $user_id, "learndash_group_{$group_id}_enrolled_at", $timestamp );
+/** Shift one stored timestamp in place. Returns the new value, or 0 when nothing is stored. */
+function eds_shift_enrollment_meta( $user_id, $key, $direction, $amount, $unit ) {
+    $timestamp = (int) get_user_meta( $user_id, $key, true );
+    if ( ! $timestamp ) {
+        return 0;
+    }
+
+    $shifted = eds_shift_enrollment_timestamp( $timestamp, $direction, $amount, $unit );
+    update_user_meta( $user_id, $key, $shifted );
+
+    return $shifted;
+}
+
+/**
+ * Re-anchor a group and its courses, never later than where the learner already stands.
+ *
+ * Each key keeps the earlier of its stored value and the new one, because course anchors
+ * legitimately run ahead of the group after quiz checkpoints. Moving one forward would take
+ * back letters the learner has already unlocked. learndash_group_{id}_enrolled_at is left
+ * alone: it is LearnDash's enrollment record, read by reports and by the GamiPress
+ * membership-days achievements, not a drip anchor.
+ */
+function eds_pull_back_group_enrollment( $user_id, $group_id, $timestamp, $group_courses = null ) {
+    $key      = "group_{$group_id}_access_from";
+    $existing = (int) get_user_meta( $user_id, $key, true );
+    update_user_meta( $user_id, $key, $existing ? min( $existing, $timestamp ) : $timestamp );
 
     $group_courses = $group_courses ?? learndash_group_enrolled_courses( $group_id );
 
     foreach ( (array) $group_courses as $course_id ) {
-        update_user_meta( $user_id, "course_{$course_id}_access_from", $timestamp );
-        ld_update_course_access( $user_id, $course_id, false );
+        eds_pull_back_course_enrollment( $user_id, $course_id, $timestamp );
     }
 }
 
+function eds_pull_back_course_enrollment( $user_id, $course_id, $timestamp ) {
+    $key      = "course_{$course_id}_access_from";
+    $existing = (int) get_user_meta( $user_id, $key, true );
+
+    update_user_meta( $user_id, $key, $existing ? min( $existing, $timestamp ) : $timestamp );
+    ld_update_course_access( $user_id, $course_id, false );
+}
+
+/**
+ * Move a course's drip anchor back one day.
+ *
+ * The anchor LearnDash drips letters from is course_{id}_access_from, with the group
+ * timestamp used only as a fallback when that meta is empty (ld_course_access_from ->
+ * learndash_user_group_enrolled_to_course_from). learndash_group_{id}_enrolled_at is a
+ * reports field that LearnDash re-stamps to time() on every group add, so it must never be
+ * copied onto a course anchor: doing that throws a long-standing learner's drip forward to
+ * whenever they were last added to the group, locking everything they had already unlocked.
+ */
 function eds_shift_course_enrollment_back_one_day( $user_id, $course_id ) {
-    if ( ! $user_id || ! $course_id || ! function_exists( 'learndash_get_users_group_ids' ) ) {
+    $user_id   = absint( $user_id );
+    $course_id = absint( $course_id );
+    if ( ! $user_id || ! $course_id ) {
         return false;
-    }
-
-    $shifted = false;
-    foreach ( array_map( 'intval', (array) learndash_get_users_group_ids( $user_id ) ) as $group_id ) {
-        $courses = array_map( 'intval', (array) learndash_group_enrolled_courses( $group_id ) );
-        if ( ! in_array( (int) $course_id, $courses, true ) ) {
-            continue;
-        }
-
-        $timestamp = (int) get_user_meta( $user_id, "learndash_group_{$group_id}_enrolled_at", true );
-        $timestamp = $timestamp ?: (int) get_user_meta( $user_id, "group_{$group_id}_access_from", true );
-        if ( $timestamp ) {
-            eds_set_group_enrollment_timestamp( $user_id, $group_id, eds_shift_enrollment_timestamp( $timestamp, '-', 1, 'days' ), $courses );
-            $shifted = true;
-        }
-    }
-
-    if ( $shifted ) {
-        return true;
     }
 
     $key       = "course_{$course_id}_access_from";
     $timestamp = (int) get_user_meta( $user_id, $key, true );
+
+    // No anchor of its own means the drip is running off the group, so start from that.
+    if ( ! $timestamp && function_exists( 'learndash_user_group_enrolled_to_course_from' ) ) {
+        $timestamp = (int) learndash_user_group_enrolled_to_course_from( $user_id, $course_id );
+    }
+
     if ( ! $timestamp ) {
         return false;
     }
@@ -125,8 +154,7 @@ function eds_delay_subscription_course_enrollment( $reset, $course_id, $subscrip
         return $reset;
     }
 
-    update_user_meta( $user_id, "course_{$course_id}_access_from", $timestamp );
-    ld_update_course_access( $user_id, $course_id, false );
+    eds_pull_back_course_enrollment( $user_id, $course_id, $timestamp );
 
     return false;
 }
@@ -143,7 +171,7 @@ function eds_delay_subscription_group_enrollment( $reset, $group_id, $subscripti
         return $reset;
     }
 
-    eds_set_group_enrollment_timestamp( $user_id, $group_id, $timestamp );
+    eds_pull_back_group_enrollment( $user_id, $group_id, $timestamp );
 
     return false;
 }
@@ -201,20 +229,22 @@ function eds_handle_form_submission() {
         return [ 'error' => "No courses found for group ID {$group_id}. Make sure this group exists and has courses assigned." ];
     }
 
-    $access_from_key  = "group_{$group_id}_access_from";
-    $enrolled_at_key  = "learndash_group_{$group_id}_enrolled_at";
+    // Every anchor moves by the same amount from its own stored value. Course anchors run
+    // ahead of the group once quiz checkpoints have advanced them, so reading one timestamp
+    // and stamping it over the rest would wipe that out.
+    $new_enrollment = eds_shift_enrollment_meta( $user_id, "group_{$group_id}_access_from", $direction, $amount, $unit );
 
-    $enrollment = (int) get_user_meta( $user_id, $enrolled_at_key, true );
-    if ( ! $enrollment ) {
-        $enrollment = (int) get_user_meta( $user_id, $access_from_key, true );
+    foreach ( (array) $group_courses as $course_id ) {
+        $shifted = eds_shift_enrollment_meta( $user_id, "course_{$course_id}_access_from", $direction, $amount, $unit );
+        if ( $shifted ) {
+            ld_update_course_access( $user_id, $course_id, false );
+            $new_enrollment = $new_enrollment ? min( $new_enrollment, $shifted ) : $shifted;
+        }
     }
 
-    if ( ! $enrollment ) {
+    if ( ! $new_enrollment ) {
         return [ 'error' => "No enrollment timestamp found for {$email} in group {$group_id}." ];
     }
-
-    $new_enrollment = eds_shift_enrollment_timestamp( $enrollment, $direction, $amount, $unit );
-    eds_set_group_enrollment_timestamp( $user_id, $group_id, $new_enrollment, $group_courses );
 
     $direction_label = $direction === '+' ? 'forward' : 'backward';
     $new_datetime = new DateTime( '@' . $new_enrollment );
@@ -222,7 +252,7 @@ function eds_handle_form_submission() {
     $new_date_display = $new_datetime->format( 'Y-m-d H:i:s T' );
 
     return [
-        'success' => "Successfully shifted {$email}'s enrollment {$direction_label} by {$amount} {$unit} in group {$group_id}. New enrollment date: {$new_date_display}.",
+        'success' => "Successfully shifted {$email}'s enrollment {$direction_label} by {$amount} {$unit} in group {$group_id}. Earliest anchor is now {$new_date_display}.",
     ];
 }
 
