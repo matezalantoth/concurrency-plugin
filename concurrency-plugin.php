@@ -1,8 +1,8 @@
 <?php
 /**
  * Plugin Name: Enrollment Date Shifter
- * Description: Shift a LearnDash user's group enrollment date forwards or backwards.
- * Version: 1.3.0
+ * Description: Shift a LearnDash user's enrollment dates, and advance them as quiz checkpoints are cleared.
+ * Version: 1.4.0
  * Author: Concurrency
  */
 
@@ -11,18 +11,14 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 add_action( 'admin_menu', 'eds_register_admin_page' );
-add_action( 'wp_login', 'eds_auto_adjust_enrollment_on_login', 10, 2 );
-add_action( 'wp', 'eds_auto_adjust_enrollment_for_current_user' );
 add_filter( 'learndash_woocommerce_reset_subscription_course_access_from', 'eds_delay_subscription_course_enrollment', 10, 3 );
 add_filter( 'learndash_woocommerce_reset_subscription_group_access_from', 'eds_delay_subscription_group_enrollment', 10, 3 );
 add_action( 'ldoq_quiz_skipped', 'eds_shift_after_skipped_quiz', 10, 3 );
 add_action( 'voap_quiz_purchased', 'eds_shift_after_purchased_quiz', 10, 3 );
 
-define( 'EDS_PROGRESS_GROUP_ID', 2528 );
 define( 'EDS_PROGRESS_COURSE_ID', 100 );
 
 require_once __DIR__ . '/quiz-backfill.php';
-require_once __DIR__ . '/activity-seed.php';
 
 function eds_shift_enrollment_timestamp( $timestamp, $direction, $amount, $unit ) {
     $datetime = new DateTime( '@' . $timestamp );
@@ -36,44 +32,73 @@ function eds_shift_enrollment_timestamp( $timestamp, $direction, $amount, $unit 
     return $datetime->getTimestamp();
 }
 
-function eds_set_group_enrollment_timestamp( $user_id, $group_id, $timestamp, $group_courses = null ) {
-    update_user_meta( $user_id, "group_{$group_id}_access_from", $timestamp );
-    update_user_meta( $user_id, "learndash_group_{$group_id}_enrolled_at", $timestamp );
+/** Shift one stored timestamp in place. Returns the new value, or 0 when nothing is stored. */
+function eds_shift_enrollment_meta( $user_id, $key, $direction, $amount, $unit ) {
+    $timestamp = (int) get_user_meta( $user_id, $key, true );
+    if ( ! $timestamp ) {
+        return 0;
+    }
+
+    $shifted = eds_shift_enrollment_timestamp( $timestamp, $direction, $amount, $unit );
+    update_user_meta( $user_id, $key, $shifted );
+
+    return $shifted;
+}
+
+/**
+ * Re-anchor a group and its courses, never later than where the learner already stands.
+ *
+ * Each key keeps the earlier of its stored value and the new one, because course anchors
+ * legitimately run ahead of the group after quiz checkpoints. Moving one forward would take
+ * back letters the learner has already unlocked. learndash_group_{id}_enrolled_at is left
+ * alone: it is LearnDash's enrollment record, read by reports and by the GamiPress
+ * membership-days achievements, not a drip anchor.
+ */
+function eds_pull_back_group_enrollment( $user_id, $group_id, $timestamp, $group_courses = null ) {
+    $key      = "group_{$group_id}_access_from";
+    $existing = (int) get_user_meta( $user_id, $key, true );
+    update_user_meta( $user_id, $key, $existing ? min( $existing, $timestamp ) : $timestamp );
 
     $group_courses = $group_courses ?? learndash_group_enrolled_courses( $group_id );
 
     foreach ( (array) $group_courses as $course_id ) {
-        update_user_meta( $user_id, "course_{$course_id}_access_from", $timestamp );
-        ld_update_course_access( $user_id, $course_id, false );
+        eds_pull_back_course_enrollment( $user_id, $course_id, $timestamp );
     }
 }
 
+function eds_pull_back_course_enrollment( $user_id, $course_id, $timestamp ) {
+    $key      = "course_{$course_id}_access_from";
+    $existing = (int) get_user_meta( $user_id, $key, true );
+
+    update_user_meta( $user_id, $key, $existing ? min( $existing, $timestamp ) : $timestamp );
+    ld_update_course_access( $user_id, $course_id, false );
+}
+
+/**
+ * Move a course's drip anchor back one day.
+ *
+ * The anchor LearnDash drips letters from is course_{id}_access_from, with the group
+ * timestamp used only as a fallback when that meta is empty (ld_course_access_from ->
+ * learndash_user_group_enrolled_to_course_from). learndash_group_{id}_enrolled_at is a
+ * reports field that LearnDash re-stamps to time() on every group add, so it must never be
+ * copied onto a course anchor: doing that throws a long-standing learner's drip forward to
+ * whenever they were last added to the group, locking everything they had already unlocked.
+ */
 function eds_shift_course_enrollment_back_one_day( $user_id, $course_id ) {
-    if ( ! $user_id || ! $course_id || ! function_exists( 'learndash_get_users_group_ids' ) ) {
+    $user_id   = absint( $user_id );
+    $course_id = absint( $course_id );
+    if ( ! $user_id || ! $course_id ) {
         return false;
-    }
-
-    $shifted = false;
-    foreach ( array_map( 'intval', (array) learndash_get_users_group_ids( $user_id ) ) as $group_id ) {
-        $courses = array_map( 'intval', (array) learndash_group_enrolled_courses( $group_id ) );
-        if ( ! in_array( (int) $course_id, $courses, true ) ) {
-            continue;
-        }
-
-        $timestamp = (int) get_user_meta( $user_id, "learndash_group_{$group_id}_enrolled_at", true );
-        $timestamp = $timestamp ?: (int) get_user_meta( $user_id, "group_{$group_id}_access_from", true );
-        if ( $timestamp ) {
-            eds_set_group_enrollment_timestamp( $user_id, $group_id, eds_shift_enrollment_timestamp( $timestamp, '-', 1, 'days' ), $courses );
-            $shifted = true;
-        }
-    }
-
-    if ( $shifted ) {
-        return true;
     }
 
     $key       = "course_{$course_id}_access_from";
     $timestamp = (int) get_user_meta( $user_id, $key, true );
+
+    // No anchor of its own means the drip is running off the group, so start from that.
+    if ( ! $timestamp && function_exists( 'learndash_user_group_enrolled_to_course_from' ) ) {
+        $timestamp = (int) learndash_user_group_enrolled_to_course_from( $user_id, $course_id );
+    }
+
     if ( ! $timestamp ) {
         return false;
     }
@@ -129,8 +154,7 @@ function eds_delay_subscription_course_enrollment( $reset, $course_id, $subscrip
         return $reset;
     }
 
-    update_user_meta( $user_id, "course_{$course_id}_access_from", $timestamp );
-    ld_update_course_access( $user_id, $course_id, false );
+    eds_pull_back_course_enrollment( $user_id, $course_id, $timestamp );
 
     return false;
 }
@@ -147,242 +171,9 @@ function eds_delay_subscription_group_enrollment( $reset, $group_id, $subscripti
         return $reset;
     }
 
-    eds_set_group_enrollment_timestamp( $user_id, $group_id, $timestamp );
+    eds_pull_back_group_enrollment( $user_id, $group_id, $timestamp );
 
     return false;
-}
-
-function eds_auto_adjust_enrollment_on_login( $user_login, $user ) {
-    eds_maybe_align_returning_user( $user->ID );
-    add_action( 'shutdown', 'eds_store_current_activity' );
-}
-
-function eds_auto_adjust_enrollment_for_current_user() {
-    if ( is_user_logged_in() ) {
-        eds_maybe_align_returning_user( get_current_user_id() );
-        add_action( 'shutdown', 'eds_store_current_activity' );
-    }
-}
-
-function eds_get_topic_number( $topic_id ) {
-    return preg_match( '/^\s*(\d+)\s*\./u', get_the_title( $topic_id ), $matches ) ? (int) $matches[1] : 0;
-}
-
-function eds_get_topic_target( $topic_id, $course_id ) {
-    $topic_ids = (array) learndash_get_course_steps( $course_id, [ 'sfwd-topic' ] );
-    $topic_ids = array_map( 'intval', $topic_ids );
-    $index = array_search( (int) $topic_id, $topic_ids, true );
-
-    if ( false === $index ) {
-        return [];
-    }
-
-    $first_number = $topic_ids ? eds_get_topic_number( $topic_ids[0] ) : 0;
-    $visible_after = absint( learndash_get_setting( $topic_id, 'visible_after' ) );
-
-    if ( ! $visible_after && $index ) {
-        $topic_number = eds_get_topic_number( $topic_id );
-        $visible_after = $first_number && $topic_number >= $first_number
-            ? $topic_number - $first_number
-            : $index;
-    }
-
-    return [
-        'topic_id'      => (int) $topic_id,
-        'visible_after' => $visible_after,
-    ];
-}
-
-/**
- * Furthest letter a learner ever opened, from LearnDash's activity log.
- *
- * A row lands there when a topic is *opened*, so this also counts letters that were read but never
- * marked done. It is a superset of both course progress and learndash_user_course_last_step(), and
- * unlike the latter it does not drag a learner back when they re-read an early letter.
- */
-function eds_seed_furthest_topic( $user_id ) {
-    global $wpdb;
-
-    if ( ! class_exists( 'LDLMS_DB' ) ) {
-        return 0;
-    }
-
-    $topic_ids = $wpdb->get_col(
-        $wpdb->prepare(
-            'SELECT DISTINCT post_id FROM ' . esc_sql( LDLMS_DB::get_table_name( 'user_activity' ) )
-            . ' WHERE user_id = %d AND course_id = %d AND activity_type = %s',
-            $user_id,
-            EDS_PROGRESS_COURSE_ID,
-            'topic'
-        )
-    );
-
-    return eds_furthest_of( (array) $topic_ids );
-}
-
-/** The topic with the highest drip day, or 0 when none of them belong to the course. */
-function eds_furthest_of( $topic_ids ) {
-    $furthest = 0;
-
-    foreach ( array_map( 'intval', $topic_ids ) as $topic_id ) {
-        if ( eds_topic_drip_day( $topic_id ) > eds_topic_drip_day( $furthest ) ) {
-            $furthest = $topic_id;
-        }
-    }
-
-    return $furthest;
-}
-
-function eds_get_previous_activity( $user_id ) {
-    $activity = get_user_meta( $user_id, '_eds_previous_activity', true );
-    $activity = is_array( $activity ) ? $activity : [];
-
-    if ( empty( $activity['date'] ) ) {
-        $activity['date'] = get_user_meta( $user_id, '_eds_last_active_date', true );
-    }
-    if ( empty( $activity['date'] ) ) {
-        $activity['date'] = get_user_meta( $user_id, 'voa_streak_date', true );
-    }
-    if ( empty( $activity['topic_id'] ) ) {
-        $activity['topic_id'] = eds_seed_furthest_topic( $user_id );
-    }
-
-    return [
-        'date'     => $activity['date'] ?? '',
-        'topic_id' => absint( $activity['topic_id'] ?? 0 ),
-    ];
-}
-
-function eds_topic_drip_day( $topic_id ) {
-    static $days = [];
-
-    if ( ! isset( $days[ $topic_id ] ) ) {
-        $target = eds_get_topic_target( $topic_id, EDS_PROGRESS_COURSE_ID );
-
-        // Unknown topics rank below everything, so they never displace a known one.
-        $days[ $topic_id ] = $target ? (int) $target['visible_after'] : -1;
-    }
-
-    return $days[ $topic_id ];
-}
-
-function eds_store_current_activity() {
-    if ( ! is_user_logged_in() ) {
-        return;
-    }
-
-    $user_id = get_current_user_id();
-    $previous = eds_get_previous_activity( $user_id );
-    $topic_id = function_exists( 'learndash_user_course_last_step' )
-        ? absint( learndash_user_course_last_step( $user_id, EDS_PROGRESS_COURSE_ID ) )
-        : 0;
-
-    if (
-        ! $topic_id
-        || get_post_type( $topic_id ) !== 'sfwd-topic'
-        || (int) learndash_get_course_id( $topic_id ) !== EDS_PROGRESS_COURSE_ID
-    ) {
-        $topic_id = $previous['topic_id'];
-    }
-
-    // learndash_user_course_last_step() is the most recently *visited* step, not the
-    // furthest reached, so revisiting an earlier topic must not drag the anchor back.
-    if (
-        $topic_id !== $previous['topic_id']
-        && $previous['topic_id']
-        && eds_topic_drip_day( $topic_id ) <= eds_topic_drip_day( $previous['topic_id'] )
-    ) {
-        $topic_id = $previous['topic_id'];
-    }
-
-    update_user_meta(
-        $user_id,
-        '_eds_previous_activity',
-        [
-            'date'        => current_time( 'Y-m-d' ),
-            'topic_id'    => $topic_id,
-            'recorded_at' => time(),
-        ]
-    );
-}
-
-function eds_progress_enrollment_timestamp( $visible_after, $today_str ) {
-    $today = new DateTime( $today_str, wp_timezone() );
-    $today->setTime( 0, 0 );
-
-    return $today->getTimestamp() - ( absint( $visible_after ) * DAY_IN_SECONDS );
-}
-
-function eds_maybe_align_returning_user( $user_id ) {
-    $today_str = current_time( 'Y-m-d' );
-
-    $last_adjusted = get_user_meta( $user_id, '_eds_last_adjusted', true );
-    if ( $last_adjusted === $today_str ) {
-        return;
-    }
-
-    $previous_activity = eds_get_previous_activity( $user_id );
-    $last_date_str = $previous_activity['date'];
-
-    update_user_meta( $user_id, '_eds_last_adjusted', $today_str );
-
-    if ( empty( $last_date_str ) || empty( $previous_activity['topic_id'] ) ) {
-        return;
-    }
-
-    $wp_timezone = wp_timezone();
-
-    $today     = new DateTime( $today_str, $wp_timezone );
-    $last_date = new DateTime( $last_date_str, $wp_timezone );
-
-    if ( $last_date >= $today ) {
-        return;
-    }
-
-    $diff_days = (int) $last_date->diff( $today )->days;
-
-    // The last active day itself is not a missed day.
-    $missed_days = $diff_days - 1;
-
-    if ( $missed_days < 1 ) {
-        return;
-    }
-
-    if (
-        ! function_exists( 'learndash_get_users_group_ids' )
-        || ! function_exists( 'learndash_get_course_steps' )
-        || get_post_type( EDS_PROGRESS_COURSE_ID ) !== 'sfwd-courses'
-    ) {
-        return;
-    }
-
-    $group_ids = array_map( 'intval', (array) learndash_get_users_group_ids( $user_id ) );
-    if ( ! in_array( EDS_PROGRESS_GROUP_ID, $group_ids, true ) ) {
-        return;
-    }
-
-    $target = eds_get_topic_target( $previous_activity['topic_id'], EDS_PROGRESS_COURSE_ID );
-    if ( ! $target ) {
-        return;
-    }
-
-    $old_timestamp = (int) get_user_meta( $user_id, 'course_' . EDS_PROGRESS_COURSE_ID . '_access_from', true );
-    // The learner already read the anchor letter, so a new day of activity opens the next one.
-    $new_timestamp = eds_progress_enrollment_timestamp( $target['visible_after'] + 1, $today_str );
-
-    eds_set_group_enrollment_timestamp( $user_id, EDS_PROGRESS_GROUP_ID, $new_timestamp, [ EDS_PROGRESS_COURSE_ID ] );
-    update_user_meta(
-        $user_id,
-        '_eds_last_progress_alignment',
-        [
-            'course_id'   => EDS_PROGRESS_COURSE_ID,
-            'topic_id'    => $target['topic_id'],
-            'missed_days' => $missed_days,
-            'from'        => $old_timestamp,
-            'to'          => $new_timestamp,
-            'adjusted_at' => time(),
-        ]
-    );
 }
 
 function eds_register_admin_page() {
@@ -438,20 +229,22 @@ function eds_handle_form_submission() {
         return [ 'error' => "No courses found for group ID {$group_id}. Make sure this group exists and has courses assigned." ];
     }
 
-    $access_from_key  = "group_{$group_id}_access_from";
-    $enrolled_at_key  = "learndash_group_{$group_id}_enrolled_at";
+    // Every anchor moves by the same amount from its own stored value. Course anchors run
+    // ahead of the group once quiz checkpoints have advanced them, so reading one timestamp
+    // and stamping it over the rest would wipe that out.
+    $new_enrollment = eds_shift_enrollment_meta( $user_id, "group_{$group_id}_access_from", $direction, $amount, $unit );
 
-    $enrollment = (int) get_user_meta( $user_id, $enrolled_at_key, true );
-    if ( ! $enrollment ) {
-        $enrollment = (int) get_user_meta( $user_id, $access_from_key, true );
+    foreach ( (array) $group_courses as $course_id ) {
+        $shifted = eds_shift_enrollment_meta( $user_id, "course_{$course_id}_access_from", $direction, $amount, $unit );
+        if ( $shifted ) {
+            ld_update_course_access( $user_id, $course_id, false );
+            $new_enrollment = $new_enrollment ? min( $new_enrollment, $shifted ) : $shifted;
+        }
     }
 
-    if ( ! $enrollment ) {
+    if ( ! $new_enrollment ) {
         return [ 'error' => "No enrollment timestamp found for {$email} in group {$group_id}." ];
     }
-
-    $new_enrollment = eds_shift_enrollment_timestamp( $enrollment, $direction, $amount, $unit );
-    eds_set_group_enrollment_timestamp( $user_id, $group_id, $new_enrollment, $group_courses );
 
     $direction_label = $direction === '+' ? 'forward' : 'backward';
     $new_datetime = new DateTime( '@' . $new_enrollment );
@@ -459,7 +252,7 @@ function eds_handle_form_submission() {
     $new_date_display = $new_datetime->format( 'Y-m-d H:i:s T' );
 
     return [
-        'success' => "Successfully shifted {$email}'s enrollment {$direction_label} by {$amount} {$unit} in group {$group_id}. New enrollment date: {$new_date_display}.",
+        'success' => "Successfully shifted {$email}'s enrollment {$direction_label} by {$amount} {$unit} in group {$group_id}. Earliest anchor is now {$new_date_display}.",
     ];
 }
 

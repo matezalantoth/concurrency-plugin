@@ -22,55 +22,11 @@ function get_user_meta( $user_id, $key ) {
     return $GLOBALS['eds_test_meta'][ $user_id ][ $key ] ?? '';
 }
 function ld_update_course_access() {}
-function get_the_title( $topic_id ) {
-    return [ 201 => '13. First', 202 => '14. Second', 203 => '15. Third' ][ $topic_id ];
-}
-function learndash_get_course_steps() {
-    return [ 201, 202, 203 ];
-}
-function learndash_get_setting() {
-    return 0;
-}
 function absint( $value ) {
     return abs( (int) $value );
 }
-function current_time() {
-    return '2026-03-20';
-}
 function learndash_get_users_group_ids() {
     return [ 7, 2528 ];
-}
-function learndash_user_course_last_step() {
-    return $GLOBALS['eds_test_last_step'] ?? 0;
-}
-class LDLMS_DB {
-    public static function get_table_name() {
-        return 'wp_learndash_user_activity';
-    }
-}
-function esc_sql( $sql ) {
-    return $sql;
-}
-class EDS_Test_WPDB {
-    public function prepare( $query ) {
-        return $query;
-    }
-    public function get_col() {
-        return $GLOBALS['eds_test_activity'] ?? [];
-    }
-}
-$GLOBALS['wpdb'] = new EDS_Test_WPDB();
-function learndash_get_course_id( $topic_id ) {
-    return in_array( $topic_id, [ 201, 202, 203 ], true ) ? 100 : 0;
-}
-function get_post_type( $post_id ) {
-    return $post_id === 100 ? 'sfwd-courses' : 'sfwd-topic';
-}
-function is_user_logged_in() {
-    return true;
-}
-function get_current_user_id() {
-    return 42;
 }
 
 class WC_Subscription {
@@ -85,101 +41,57 @@ class WC_Subscription {
 
 require __DIR__ . '/../concurrency-plugin.php';
 
+function eds_test_date( $key ) {
+    $value = $GLOBALS['eds_test_meta'][42][ $key ] ?? null;
+
+    return null === $value ? 'unset' : gmdate( 'Y-m-d H:i:s', $value );
+}
+
+function eds_test_check( $passed, $message ) {
+    if ( ! $passed ) {
+        throw new RuntimeException( $message );
+    }
+}
+
 $subscription = new WC_Subscription();
-$result       = eds_delay_subscription_group_enrollment( true, 7, $subscription );
-$actual       = $GLOBALS['eds_test_meta'][42]['group_7_access_from'];
 
-if (
-    $result !== false
-    || gmdate( 'Y-m-d H:i:s', $actual ) !== '2026-03-08 00:00:00'
-    || $GLOBALS['eds_test_meta'][42]['learndash_group_7_enrolled_at'] !== $actual
-    || $GLOBALS['eds_test_meta'][42]['course_101_access_from'] !== $actual
-) {
-    throw new RuntimeException( 'The minus-12-day enrollment shift failed.' );
-}
+eds_test_check( false === eds_delay_subscription_group_enrollment( true, 7, $subscription ), 'The group filter must take over from LearnDash WooCommerce.' );
+eds_test_check( eds_test_date( 'group_7_access_from' ) === '2026-03-08 00:00:00', 'The minus-12-day enrollment shift failed.' );
+eds_test_check( eds_test_date( 'course_101_access_from' ) === '2026-03-08 00:00:00', 'The group courses were not anchored with the group.' );
 
-if ( ! eds_shift_after_skipped_quiz( [ 'quiz' => 20 ], 42, 101 ) ) {
-    throw new RuntimeException( 'A skipped quiz did not advance the enrollment.' );
-}
-if (
-    gmdate( 'Y-m-d H:i:s', $GLOBALS['eds_test_meta'][42]['group_7_access_from'] ) !== '2026-03-07 00:00:00'
-    || eds_shift_after_purchased_quiz( 20, 42, 101 )
-    || gmdate( 'Y-m-d H:i:s', $GLOBALS['eds_test_meta'][42]['course_101_access_from'] ) !== '2026-03-07 00:00:00'
-) {
-    throw new RuntimeException( 'A skipped quiz was advanced more than once when later purchased.' );
-}
+// learndash_group_{id}_enrolled_at is LearnDash's enrollment record. Reports and the GamiPress
+// membership-days achievements read it, so drip tuning must not write to it.
+eds_test_check( eds_test_date( 'learndash_group_7_enrolled_at' ) === 'unset', 'The enrollment record was overwritten with a drip anchor.' );
 
-$target = eds_get_topic_target( 202, 100 );
-if ( $target !== [ 'topic_id' => 202, 'visible_after' => 1 ] ) {
-    throw new RuntimeException( 'The last-accessed topic lookup failed.' );
-}
+eds_test_check( eds_shift_after_skipped_quiz( [ 'quiz' => 20 ], 42, 101 ), 'A skipped quiz did not advance the enrollment.' );
+eds_test_check( eds_test_date( 'course_101_access_from' ) === '2026-03-07 00:00:00', 'A skipped quiz did not move the course anchor back a day.' );
+eds_test_check( ! eds_shift_after_purchased_quiz( 20, 42, 101 ), 'A skipped quiz advanced again when it was later purchased.' );
+eds_test_check( eds_test_date( 'course_101_access_from' ) === '2026-03-07 00:00:00', 'A repeat checkpoint moved the anchor.' );
 
-if ( gmdate( 'Y-m-d H:i:s', eds_progress_enrollment_timestamp( 2, '2026-03-20' ) ) !== '2026-03-18 00:00:00' ) {
-    throw new RuntimeException( 'The progress enrollment alignment failed.' );
-}
+// A checkpoint moves the course it was cleared in and nothing else.
+eds_test_check( eds_test_date( 'group_7_access_from' ) === '2026-03-08 00:00:00', 'A quiz checkpoint moved the group anchor.' );
+eds_test_check( eds_test_date( 'course_102_access_from' ) === '2026-03-08 00:00:00', 'A quiz checkpoint moved a course it was not cleared in.' );
 
-$GLOBALS['eds_test_meta'][42]['_eds_previous_activity'] = [
-    'date'        => '2026-03-17',
-    'topic_id'    => 202,
-    'recorded_at' => 1773705600,
-];
-$GLOBALS['eds_test_meta'][42]['course_100_access_from'] = 1773705600;
-$GLOBALS['eds_test_last_step'] = 203;
+// LearnDash re-stamps learndash_group_{id}_enrolled_at to time() on every group add, so a renewal
+// or a re-add leaves it far ahead of a long-standing learner's course anchor. A quiz checkpoint
+// must still only step that anchor back a day, never adopt the group's date.
+$GLOBALS['eds_test_meta'][42]['learndash_group_7_enrolled_at'] = time();
+$GLOBALS['eds_test_meta'][42]['group_7_access_from']           = time();
 
-eds_maybe_align_returning_user( 42 );
+eds_test_check( eds_shift_after_purchased_quiz( 21, 42, 101 ), 'A purchased quiz did not advance the enrollment.' );
+eds_test_check( eds_test_date( 'course_101_access_from' ) === '2026-03-06 00:00:00', 'A recent group stamp dragged the course drip anchor forward.' );
 
-$alignment = $GLOBALS['eds_test_meta'][42]['_eds_last_progress_alignment'];
-if (
-    $alignment['topic_id'] !== 202
-    || $alignment['missed_days'] !== 2
-    || gmdate( 'Y-m-d H:i:s', $alignment['to'] ) !== '2026-03-18 00:00:00'
-) {
-    throw new RuntimeException( 'The previous activity was not used for enrollment alignment.' );
-}
+// Re-activating the subscription restores access. It must not take back the letters the
+// checkpoints already unlocked.
+eds_test_check( false === eds_delay_subscription_group_enrollment( true, 7, $subscription ), 'The group filter must take over on re-activation.' );
+eds_test_check( eds_test_date( 'course_101_access_from' ) === '2026-03-06 00:00:00', 'Re-activation clawed back the quiz checkpoints.' );
+eds_test_check( eds_test_date( 'group_7_access_from' ) === '2026-03-08 00:00:00', 'Re-activation did not pull the group anchor back.' );
 
-// Topic 202 is drip day 1 and was already read, so today must be drip day 2: topic 203.
-if ( eds_progress_enrollment_timestamp( 2, '2026-03-20' ) !== $alignment['to'] ) {
-    throw new RuntimeException( 'A returning learner was not given the next letter.' );
-}
-
-eds_store_current_activity();
-$stored_activity = $GLOBALS['eds_test_meta'][42]['_eds_previous_activity'];
-if ( $stored_activity['date'] !== '2026-03-20' || $stored_activity['topic_id'] !== 203 ) {
-    throw new RuntimeException( 'The current activity snapshot was not stored after alignment.' );
-}
-
-// Reviewing an earlier topic keeps the furthest one as the anchor.
-$GLOBALS['eds_test_last_step'] = 201;
-eds_store_current_activity();
-if ( $GLOBALS['eds_test_meta'][42]['_eds_previous_activity']['topic_id'] !== 203 ) {
-    throw new RuntimeException( 'Revisiting an earlier topic moved the progress anchor backwards.' );
-}
-
-// A topic outside the course cannot displace the anchor either.
-$GLOBALS['eds_test_last_step'] = 999;
-eds_store_current_activity();
-if ( $GLOBALS['eds_test_meta'][42]['_eds_previous_activity']['topic_id'] !== 203 ) {
-    throw new RuntimeException( 'An unrelated topic moved the progress anchor.' );
-}
-
-// No stored snapshot: the seed takes the furthest letter opened, in any visit order.
-unset( $GLOBALS['eds_test_meta'][42]['_eds_previous_activity'] );
-$GLOBALS['eds_test_last_step'] = 201;
-$GLOBALS['eds_test_activity']  = [ 202, 203, 201 ];
-
-if ( eds_seed_furthest_topic( 42 ) !== 203 ) {
-    throw new RuntimeException( 'The seed did not take the furthest opened topic.' );
-}
-
-// Opened but never marked done still counts, and unrelated topics never win.
-$GLOBALS['eds_test_activity'] = [ 999, 201 ];
-if ( eds_seed_furthest_topic( 42 ) !== 201 ) {
-    throw new RuntimeException( 'A topic outside the course was seeded as the anchor.' );
-}
-
-$GLOBALS['eds_test_activity'] = [ 999 ];
-if ( eds_seed_furthest_topic( 42 ) !== 0 ) {
-    throw new RuntimeException( 'A learner with no course activity got an anchor.' );
-}
+// The manual shifter moves every anchor by the same amount, each from its own value.
+eds_test_check( eds_shift_enrollment_meta( 42, 'group_7_access_from', '-', 2, 'days' ), 'The manual shift reported nothing to move.' );
+eds_shift_enrollment_meta( 42, 'course_101_access_from', '-', 2, 'days' );
+eds_test_check( eds_test_date( 'group_7_access_from' ) === '2026-03-06 00:00:00', 'The manual shift did not move the group anchor.' );
+eds_test_check( eds_test_date( 'course_101_access_from' ) === '2026-03-04 00:00:00', 'The manual shift flattened the course anchor onto the group.' );
+eds_test_check( ! eds_shift_enrollment_meta( 42, 'course_999_access_from', '-', 2, 'days' ), 'The manual shift invented an anchor that was never stored.' );
 
 echo "Enrollment shift check passed.\n";
