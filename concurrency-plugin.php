@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Enrollment Date Shifter
  * Description: Shift a LearnDash user's enrollment dates, and advance them as quiz checkpoints are cleared.
- * Version: 1.4.0
+ * Version: 1.5.0
  * Author: Concurrency
  */
 
@@ -19,6 +19,7 @@ add_action( 'voap_quiz_purchased', 'eds_shift_after_purchased_quiz', 10, 3 );
 define( 'EDS_PROGRESS_COURSE_ID', 100 );
 
 require_once __DIR__ . '/quiz-backfill.php';
+require_once __DIR__ . '/daily-progression.php';
 
 function eds_shift_enrollment_timestamp( $timestamp, $direction, $amount, $unit ) {
     $datetime = new DateTime( '@' . $timestamp );
