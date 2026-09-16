@@ -1,4 +1,4 @@
-# Enrollment Date Shifter 1.5.0 — daily letter progression
+# Enrollment Date Shifter 1.5.1 — daily letter progression
 
 ## Finding
 
@@ -6,7 +6,7 @@ Confirmed in this workspace's code and local database, not on the production ser
 
 - Course **100**, “Napi olvasnivaló”, contains the letters as **`sfwd-topic`** posts. Lessons are chapter containers.
 - Letter 2 has `visible_after = 1`, letter 3 has `visible_after = 2`, etc. LearnDash calculates availability from the enrollment anchor plus elapsed days. It does not consult completion in that calculation.
-- The existing shifter adjusts subscription anchors and advances them on quiz skips/purchases. It has no login or incomplete-letter pause. The active local snippets/automations contain no such pause either.
+- The shifter adjusts subscription anchors. Quiz skips and purchases no longer advance enrollment dates. It has no login or incomplete-letter pause. The active local snippets/automations contain no such pause either.
 - LearnDash's separate linear-completion check explains why a missing “I have read” tick can prevent completing later letters. Once the missing step is completed, elapsed drip dates alone impose no new daily wait.
 
 The offline regression test reproduces the date-unlock bug using the installed LearnDash implementation. The disposable-database integration test also reproduces it in WordPress, then verifies actual completion writes with the fix enabled.
@@ -19,7 +19,7 @@ An additional gate in the existing plugin, scoped to course 100:
 2. Subsequent letters require earlier letters to be completed. Logging in, opening a page, and days spent away do not advance this gate.
 3. The next letter becomes eligible at **the first midnight after its predecessor's successful completion**, in the WordPress site's timezone. It is not a rolling 24-hour wait. Completing at 23:59 can permit the next letter at 00:00.
 4. Later original drip dates, membership/subscription access and LearnDash's quiz/prerequisite requirements still apply. The gate never grants membership or moves enrollment dates.
-5. Completed letters remain readable. Chapters do not consume daily letters. Topic quizzes inherit the letter's gate; quiz-related enrollment shifts cannot override it.
+5. Completed letters remain readable. Chapters do not consume daily letters. Topic quizzes inherit the letter's gate.
 
 The code reuses LearnDash's existing topic-completion flags and `activity_completed` timestamps instead of writing a second completion clock on a browser click. Its completion filter rejects locked submissions on the server, including stale forms and forced calls to LearnDash's completion primitive. The date filter supplies navigation availability; the page guard runs before templates/Elementor render, and REST preparation removes locked bodies. Content already downloaded in a browser cannot be revoked.
 

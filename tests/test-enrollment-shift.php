@@ -4,11 +4,10 @@ if ( PHP_SAPI !== 'cli' ) {
     exit;
 }
 
-define( 'ABSPATH', __DIR__ );
+define( 'ABSPATH', dirname( __DIR__, 4 ) . '/' );
+require ABSPATH . 'wp-includes/plugin.php';
 define( 'DAY_IN_SECONDS', 86400 );
 
-function add_action() {}
-function add_filter() {}
 function wp_timezone() {
     return new DateTimeZone( 'Europe/London' );
 }
@@ -63,23 +62,16 @@ eds_test_check( eds_test_date( 'course_101_access_from' ) === '2026-03-08 00:00:
 // membership-days achievements read it, so drip tuning must not write to it.
 eds_test_check( eds_test_date( 'learndash_group_7_enrolled_at' ) === 'unset', 'The enrollment record was overwritten with a drip anchor.' );
 
-eds_test_check( eds_shift_after_skipped_quiz( [ 'quiz' => 20 ], 42, 101 ), 'A skipped quiz did not advance the enrollment.' );
-eds_test_check( eds_test_date( 'course_101_access_from' ) === '2026-03-07 00:00:00', 'A skipped quiz did not move the course anchor back a day.' );
-eds_test_check( ! eds_shift_after_purchased_quiz( 20, 42, 101 ), 'A skipped quiz advanced again when it was later purchased.' );
-eds_test_check( eds_test_date( 'course_101_access_from' ) === '2026-03-07 00:00:00', 'A repeat checkpoint moved the anchor.' );
+$before = $GLOBALS['eds_test_meta'];
+do_action( 'ldoq_quiz_skipped', [ 'quiz' => 20 ], 42, 101 );
+do_action( 'voap_quiz_purchased', 20, 42, 101 );
+do_action( 'voap_quiz_purchased', 21, 42, 101 );
+eds_test_check( $before === $GLOBALS['eds_test_meta'], 'Quiz skips or purchases changed enrollment data.' );
 
-// A checkpoint moves the course it was cleared in and nothing else.
-eds_test_check( eds_test_date( 'group_7_access_from' ) === '2026-03-08 00:00:00', 'A quiz checkpoint moved the group anchor.' );
-eds_test_check( eds_test_date( 'course_102_access_from' ) === '2026-03-08 00:00:00', 'A quiz checkpoint moved a course it was not cleared in.' );
-
-// LearnDash re-stamps learndash_group_{id}_enrolled_at to time() on every group add, so a renewal
-// or a re-add leaves it far ahead of a long-standing learner's course anchor. A quiz checkpoint
-// must still only step that anchor back a day, never adopt the group's date.
+// Preserve anchors earned before quiz rewards were removed, even after a group re-add.
+$GLOBALS['eds_test_meta'][42]['course_101_access_from']       = strtotime( '2026-03-06 00:00:00 UTC' );
 $GLOBALS['eds_test_meta'][42]['learndash_group_7_enrolled_at'] = time();
 $GLOBALS['eds_test_meta'][42]['group_7_access_from']           = time();
-
-eds_test_check( eds_shift_after_purchased_quiz( 21, 42, 101 ), 'A purchased quiz did not advance the enrollment.' );
-eds_test_check( eds_test_date( 'course_101_access_from' ) === '2026-03-06 00:00:00', 'A recent group stamp dragged the course drip anchor forward.' );
 
 // Re-activating the subscription restores access. It must not take back the letters the
 // checkpoints already unlocked.

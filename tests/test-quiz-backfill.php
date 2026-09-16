@@ -4,8 +4,8 @@ if ( PHP_SAPI !== 'cli' ) {
     exit;
 }
 
-define( 'ABSPATH', __DIR__ );
-define( 'EDS_PROGRESS_COURSE_ID', 100 );
+define( 'ABSPATH', dirname( __DIR__, 4 ) . '/' );
+require ABSPATH . 'wp-includes/plugin.php';
 
 // Course 100: lesson 10 (topics 11, 12), lesson 20 (topic 21). Quiz per topic, plus a
 // lesson-level quiz on 20 and a course-level quiz.
@@ -29,20 +29,7 @@ $progress = [
 
 $complete_quizzes = [ '8:121' ]; // User 8 already sat quiz 121 for real.
 $recorded         = [];
-$hooks            = [ 'ldoq_quiz_skipped' => true ];
 
-function add_action( $hook, $callback = null, $priority = 10, $args = 1 ) {
-    global $hooks;
-    if ( 'ldoq_quiz_skipped' === $hook ) {
-        $hooks[ $hook ] = true;
-    }
-}
-function remove_action( $hook, $callback = null, $priority = 10 ) {
-    global $hooks;
-    if ( 'ldoq_quiz_skipped' === $hook ) {
-        $hooks[ $hook ] = false;
-    }
-}
 function add_submenu_page() {}
 function absint( $value ) { return abs( (int) $value ); }
 function is_wp_error( $value ) { return false; }
@@ -61,11 +48,9 @@ function learndash_is_quiz_complete( $user_id, $quiz_id, $course_id ) {
         || in_array( "{$user_id}:{$quiz_id}", $recorded, true );
 }
 function ldoq_record_skip( $user_id, $quiz_id, $course_id ) {
-    global $recorded, $hooks;
+    global $recorded;
     $recorded[] = "{$user_id}:{$quiz_id}";
-    if ( $hooks['ldoq_quiz_skipped'] ) {
-        $recorded[] = "drip-shift:{$user_id}";
-    }
+    do_action( 'ldoq_quiz_skipped', [ 'quiz' => $quiz_id ], $user_id, $course_id );
     return [ 'quiz' => $quiz_id ];
 }
 
@@ -75,7 +60,7 @@ class wpdb_stub {
 }
 $GLOBALS['wpdb'] = new wpdb_stub();
 
-require dirname( __DIR__ ) . '/quiz-backfill.php';
+require dirname( __DIR__ ) . '/concurrency-plugin.php';
 
 function check( $condition, $message ) {
     if ( ! $condition ) {
@@ -95,7 +80,8 @@ check(
     [ '7:111', '8:111', '8:201' ] === $recorded,
     'Passed topics and lessons backfill, unreached steps, course-level quizzes and real attempts do not.'
 );
-check( $hooks['ldoq_quiz_skipped'], 'The drip-shift hook is restored after the run.' );
+do_action( 'ldoq_quiz_skipped', [ 'quiz' => 121 ], 7, 100 );
+check( ! has_action( 'ldoq_quiz_skipped' ), 'Backfill must not register a quiz reward callback.' );
 
 $before = $recorded;
 $second = edsqb_run( 100, 0, 50, false );

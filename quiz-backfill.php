@@ -114,10 +114,6 @@ function edsqb_run( $course_id, $offset, $batch, $dry_run ) {
     $user_ids = $wpdb->get_col( "SELECT user_id FROM {$wpdb->usermeta} WHERE meta_key = '_sfwd-course_progress' ORDER BY user_id ASC" );
     $total    = count( $user_ids );
 
-    // A backfilled quiz is history, not a checkpoint the learner just cleared, so it must
-    // not advance drip dates the way a live skip does.
-    remove_action( 'ldoq_quiz_skipped', 'eds_shift_after_skipped_quiz', 10 );
-
     $users  = 0;
     $marked = 0;
     foreach ( array_slice( $user_ids, $offset, $batch ) as $user_id ) {
@@ -127,8 +123,6 @@ function edsqb_run( $course_id, $offset, $batch, $dry_run ) {
             $marked += $count;
         }
     }
-
-    add_action( 'ldoq_quiz_skipped', 'eds_shift_after_skipped_quiz', 10, 3 );
 
     return [
         'quizzes' => count( $quizzes ),
