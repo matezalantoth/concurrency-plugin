@@ -56,7 +56,9 @@ function ldoq_record_skip( $user_id, $quiz_id, $course_id ) {
 
 class wpdb_stub {
     public $usermeta = 'wp_usermeta';
-    public function get_col() { return [ 7, 8 ]; }
+    public function get_var() { return 2; }
+    public function prepare( $sql, $batch, $offset ) { $GLOBALS['last_offset'] = $offset; return [ $batch, $offset ]; }
+    public function get_col( $query ) { return array_slice( [ 7, 8 ], $query[1], $query[0] ); }
 }
 $GLOBALS['wpdb'] = new wpdb_stub();
 
@@ -92,3 +94,21 @@ check( 1 === $page['next'] && 2 === $page['total'], 'Batching reports where the 
 check( 0 === edsqb_run( 100, 1, 1, true )['next'], 'The final batch reports no remainder.' );
 
 echo "Quiz backfill tests passed.\n";
+
+function current_user_can() { return true; }
+function wp_verify_nonce() { return true; }
+function sanitize_text_field($v) { return $v; }
+function wp_unslash($v) { return $v; }
+$_POST = ['edsqb_nonce' => 'ok', 'edsqb_course_id' => 100, 'edsqb_offset' => 50, 'edsqb_batch' => 50, 'edsqb_context' => '100:1'];
+edsqb_handle_form_submission();
+check($last_offset === 0, 'Switching dry run to real starts at zero.');
+$_POST['edsqb_dry_run'] = 1;
+edsqb_handle_form_submission();
+check($last_offset === 50, 'Unchanged course and mode continue.');
+$_POST['edsqb_context'] = '99:1';
+edsqb_handle_form_submission();
+check($last_offset === 0, 'Changing course resets the cursor.');
+$_POST['edsqb_context'] = '100:1'; $_POST['edsqb_restart'] = 1;
+edsqb_handle_form_submission();
+check($last_offset === 0, 'Explicit restart starts at zero.');
+echo "Backfill form cursor checks passed.\n";

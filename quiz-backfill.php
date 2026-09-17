@@ -111,12 +111,17 @@ function edsqb_run( $course_id, $offset, $batch, $dry_run ) {
         return [ 'error' => "Course {$course_id} has no quizzes to backfill." ];
     }
 
-    $user_ids = $wpdb->get_col( "SELECT user_id FROM {$wpdb->usermeta} WHERE meta_key = '_sfwd-course_progress' ORDER BY user_id ASC" );
-    $total    = count( $user_ids );
+    $offset = max( 0, (int) $offset );
+    $batch = max( 1, min( 500, (int) $batch ) );
+    $total = (int) $wpdb->get_var( "SELECT COUNT(DISTINCT user_id) FROM {$wpdb->usermeta} WHERE meta_key = '_sfwd-course_progress'" );
+    $user_ids = $wpdb->get_col( $wpdb->prepare(
+        "SELECT DISTINCT user_id FROM {$wpdb->usermeta} WHERE meta_key = '_sfwd-course_progress' ORDER BY user_id ASC LIMIT %d OFFSET %d",
+        $batch, $offset
+    ) );
 
     $users  = 0;
     $marked = 0;
-    foreach ( array_slice( $user_ids, $offset, $batch ) as $user_id ) {
+    foreach ( $user_ids as $user_id ) {
         $count = edsqb_backfill_user( (int) $user_id, $course_id, $quizzes, $dry_run );
         if ( $count ) {
             ++$users;
@@ -154,15 +159,20 @@ function edsqb_handle_form_submission() {
         return [ 'error' => 'Please enter a batch size greater than 0.' ];
     }
 
-    return edsqb_run( $course_id, $offset, $batch, ! empty( $_POST['edsqb_dry_run'] ) );
+    $dry_run = ! empty( $_POST['edsqb_dry_run'] );
+    $context = $course_id . ':' . (int) $dry_run;
+    if ( ( $_POST['edsqb_context'] ?? '' ) !== $context || isset( $_POST['edsqb_restart'] ) ) {
+        $offset = 0;
+    }
+    return edsqb_run( $course_id, $offset, $batch, $dry_run );
 }
 
 function edsqb_render_admin_page() {
-    $result = isset( $_POST['edsqb_submit'] ) ? edsqb_handle_form_submission() : null;
+    $result = isset( $_POST['edsqb_submit'] ) || isset( $_POST['edsqb_restart'] ) ? edsqb_handle_form_submission() : null;
 
     $course_id = isset( $_POST['edsqb_course_id'] ) ? absint( $_POST['edsqb_course_id'] ) : EDS_PROGRESS_COURSE_ID;
     $batch     = isset( $_POST['edsqb_batch'] ) ? absint( $_POST['edsqb_batch'] ) : 50;
-    $dry_run   = isset( $_POST['edsqb_submit'] ) ? ! empty( $_POST['edsqb_dry_run'] ) : true;
+    $dry_run   = isset( $_POST['edsqb_submit'] ) || isset( $_POST['edsqb_restart'] ) ? ! empty( $_POST['edsqb_dry_run'] ) : true;
     $offset    = isset( $result['next'] ) ? (int) $result['next'] : 0;
     ?>
     <div class="wrap">
@@ -201,6 +211,7 @@ function edsqb_render_admin_page() {
 
         <form method="post" action="" style="max-width:600px;">
             <?php wp_nonce_field( 'edsqb_backfill', 'edsqb_nonce' ); ?>
+            <input type="hidden" name="edsqb_context" value="<?php echo esc_attr( $course_id . ':' . (int) $dry_run ); ?>" />
             <input type="hidden" name="edsqb_offset" value="<?php echo esc_attr( $offset ); ?>" />
 
             <table class="form-table" role="presentation">
@@ -232,6 +243,7 @@ function edsqb_render_admin_page() {
 
             <p class="submit">
                 <input type="submit" name="edsqb_submit" class="button button-primary button-large" value="Run Backfill" />
+                <button type="submit" name="edsqb_restart" class="button" value="1">Restart from first learner</button>
             </p>
         </form>
     </div>
