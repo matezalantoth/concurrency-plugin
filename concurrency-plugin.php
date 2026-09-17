@@ -1,8 +1,8 @@
 <?php
 /**
  * Plugin Name: Enrollment Date Shifter
- * Description: Shift a LearnDash user's enrollment dates, and advance them as quiz checkpoints are cleared.
- * Version: 1.5.0
+ * Description: Shift a LearnDash user's enrollment dates.
+ * Version: 1.5.1
  * Author: Concurrency
  */
 
@@ -13,8 +13,6 @@ if ( ! defined( 'ABSPATH' ) ) {
 add_action( 'admin_menu', 'eds_register_admin_page' );
 add_filter( 'learndash_woocommerce_reset_subscription_course_access_from', 'eds_delay_subscription_course_enrollment', 10, 3 );
 add_filter( 'learndash_woocommerce_reset_subscription_group_access_from', 'eds_delay_subscription_group_enrollment', 10, 3 );
-add_action( 'ldoq_quiz_skipped', 'eds_shift_after_skipped_quiz', 10, 3 );
-add_action( 'voap_quiz_purchased', 'eds_shift_after_purchased_quiz', 10, 3 );
 
 define( 'EDS_PROGRESS_COURSE_ID', 100 );
 
@@ -50,7 +48,7 @@ function eds_shift_enrollment_meta( $user_id, $key, $direction, $amount, $unit )
  * Re-anchor a group and its courses, never later than where the learner already stands.
  *
  * Each key keeps the earlier of its stored value and the new one, because course anchors
- * legitimately run ahead of the group after quiz checkpoints. Moving one forward would take
+ * can retain earlier dates from past quiz rewards. Moving one forward would take
  * back letters the learner has already unlocked. learndash_group_{id}_enrolled_at is left
  * alone: it is LearnDash's enrollment record, read by reports and by the GamiPress
  * membership-days achievements, not a drip anchor.
@@ -73,68 +71,6 @@ function eds_pull_back_course_enrollment( $user_id, $course_id, $timestamp ) {
 
     update_user_meta( $user_id, $key, $existing ? min( $existing, $timestamp ) : $timestamp );
     ld_update_course_access( $user_id, $course_id, false );
-}
-
-/**
- * Move a course's drip anchor back one day.
- *
- * The anchor LearnDash drips letters from is course_{id}_access_from, with the group
- * timestamp used only as a fallback when that meta is empty (ld_course_access_from ->
- * learndash_user_group_enrolled_to_course_from). learndash_group_{id}_enrolled_at is a
- * reports field that LearnDash re-stamps to time() on every group add, so it must never be
- * copied onto a course anchor: doing that throws a long-standing learner's drip forward to
- * whenever they were last added to the group, locking everything they had already unlocked.
- */
-function eds_shift_course_enrollment_back_one_day( $user_id, $course_id ) {
-    $user_id   = absint( $user_id );
-    $course_id = absint( $course_id );
-    if ( ! $user_id || ! $course_id ) {
-        return false;
-    }
-
-    $key       = "course_{$course_id}_access_from";
-    $timestamp = (int) get_user_meta( $user_id, $key, true );
-
-    // No anchor of its own means the drip is running off the group, so start from that.
-    if ( ! $timestamp && function_exists( 'learndash_user_group_enrolled_to_course_from' ) ) {
-        $timestamp = (int) learndash_user_group_enrolled_to_course_from( $user_id, $course_id );
-    }
-
-    if ( ! $timestamp ) {
-        return false;
-    }
-
-    update_user_meta( $user_id, $key, eds_shift_enrollment_timestamp( $timestamp, '-', 1, 'days' ) );
-    ld_update_course_access( $user_id, $course_id, false );
-    return true;
-}
-
-function eds_advance_quiz_checkpoint( $quiz_id, $user_id, $course_id ) {
-    $quiz_id   = absint( $quiz_id );
-    $user_id   = absint( $user_id );
-    $course_id = absint( $course_id );
-    if ( ! $quiz_id || ! $user_id || ! $course_id ) {
-        return false;
-    }
-
-    $advanced = get_user_meta( $user_id, '_eds_quiz_advancements', true );
-    $advanced = is_array( $advanced ) ? $advanced : [];
-    $key      = "{$course_id}:{$quiz_id}";
-    if ( isset( $advanced[ $key ] ) || ! eds_shift_course_enrollment_back_one_day( $user_id, $course_id ) ) {
-        return false;
-    }
-
-    $advanced[ $key ] = time();
-    update_user_meta( $user_id, '_eds_quiz_advancements', $advanced );
-    return true;
-}
-
-function eds_shift_after_skipped_quiz( $attempt, $user_id, $course_id ) {
-    return eds_advance_quiz_checkpoint( $attempt['quiz'] ?? 0, $user_id, $course_id );
-}
-
-function eds_shift_after_purchased_quiz( $quiz_id, $user_id, $course_id ) {
-    return eds_advance_quiz_checkpoint( $quiz_id, $user_id, $course_id );
 }
 
 function eds_subscription_enrollment_timestamp( $subscription ) {
@@ -231,7 +167,7 @@ function eds_handle_form_submission() {
     }
 
     // Every anchor moves by the same amount from its own stored value. Course anchors run
-    // ahead of the group once quiz checkpoints have advanced them, so reading one timestamp
+    // ahead of the group from past quiz rewards, so reading one timestamp
     // and stamping it over the rest would wipe that out.
     $new_enrollment = eds_shift_enrollment_meta( $user_id, "group_{$group_id}_access_from", $direction, $amount, $unit );
 

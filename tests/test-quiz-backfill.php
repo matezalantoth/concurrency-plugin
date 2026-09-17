@@ -4,8 +4,8 @@ if ( PHP_SAPI !== 'cli' ) {
     exit;
 }
 
-define( 'ABSPATH', __DIR__ );
-define( 'EDS_PROGRESS_COURSE_ID', 100 );
+define( 'ABSPATH', dirname( __DIR__, 4 ) . '/' );
+require ABSPATH . 'wp-includes/plugin.php';
 
 // Course 100: lesson 10 (topics 11, 12), lesson 20 (topic 21). Quiz per topic, plus a
 // lesson-level quiz on 20 and a course-level quiz.
@@ -29,20 +29,7 @@ $progress = [
 
 $complete_quizzes = [ '8:121' ]; // User 8 already sat quiz 121 for real.
 $recorded         = [];
-$hooks            = [ 'ldoq_quiz_skipped' => true ];
 
-function add_action( $hook, $callback = null, $priority = 10, $args = 1 ) {
-    global $hooks;
-    if ( 'ldoq_quiz_skipped' === $hook ) {
-        $hooks[ $hook ] = true;
-    }
-}
-function remove_action( $hook, $callback = null, $priority = 10 ) {
-    global $hooks;
-    if ( 'ldoq_quiz_skipped' === $hook ) {
-        $hooks[ $hook ] = false;
-    }
-}
 function add_submenu_page() {}
 function absint( $value ) { return abs( (int) $value ); }
 function is_wp_error( $value ) { return false; }
@@ -61,21 +48,21 @@ function learndash_is_quiz_complete( $user_id, $quiz_id, $course_id ) {
         || in_array( "{$user_id}:{$quiz_id}", $recorded, true );
 }
 function ldoq_record_skip( $user_id, $quiz_id, $course_id ) {
-    global $recorded, $hooks;
+    global $recorded;
     $recorded[] = "{$user_id}:{$quiz_id}";
-    if ( $hooks['ldoq_quiz_skipped'] ) {
-        $recorded[] = "drip-shift:{$user_id}";
-    }
+    do_action( 'ldoq_quiz_skipped', [ 'quiz' => $quiz_id ], $user_id, $course_id );
     return [ 'quiz' => $quiz_id ];
 }
 
 class wpdb_stub {
     public $usermeta = 'wp_usermeta';
-    public function get_col() { return [ 7, 8 ]; }
+    public function get_var() { return 2; }
+    public function prepare( $sql, $batch, $offset ) { $GLOBALS['last_offset'] = $offset; return [ $batch, $offset ]; }
+    public function get_col( $query ) { return array_slice( [ 7, 8 ], $query[1], $query[0] ); }
 }
 $GLOBALS['wpdb'] = new wpdb_stub();
 
-require dirname( __DIR__ ) . '/quiz-backfill.php';
+require dirname( __DIR__ ) . '/concurrency-plugin.php';
 
 function check( $condition, $message ) {
     if ( ! $condition ) {
@@ -95,7 +82,8 @@ check(
     [ '7:111', '8:111', '8:201' ] === $recorded,
     'Passed topics and lessons backfill, unreached steps, course-level quizzes and real attempts do not.'
 );
-check( $hooks['ldoq_quiz_skipped'], 'The drip-shift hook is restored after the run.' );
+do_action( 'ldoq_quiz_skipped', [ 'quiz' => 121 ], 7, 100 );
+check( ! has_action( 'ldoq_quiz_skipped' ), 'Backfill must not register a quiz reward callback.' );
 
 $before = $recorded;
 $second = edsqb_run( 100, 0, 50, false );
@@ -106,3 +94,21 @@ check( 1 === $page['next'] && 2 === $page['total'], 'Batching reports where the 
 check( 0 === edsqb_run( 100, 1, 1, true )['next'], 'The final batch reports no remainder.' );
 
 echo "Quiz backfill tests passed.\n";
+
+function current_user_can() { return true; }
+function wp_verify_nonce() { return true; }
+function sanitize_text_field($v) { return $v; }
+function wp_unslash($v) { return $v; }
+$_POST = ['edsqb_nonce' => 'ok', 'edsqb_course_id' => 100, 'edsqb_offset' => 50, 'edsqb_batch' => 50, 'edsqb_context' => '100:1'];
+edsqb_handle_form_submission();
+check($last_offset === 0, 'Switching dry run to real starts at zero.');
+$_POST['edsqb_dry_run'] = 1;
+edsqb_handle_form_submission();
+check($last_offset === 50, 'Unchanged course and mode continue.');
+$_POST['edsqb_context'] = '99:1';
+edsqb_handle_form_submission();
+check($last_offset === 0, 'Changing course resets the cursor.');
+$_POST['edsqb_context'] = '100:1'; $_POST['edsqb_restart'] = 1;
+edsqb_handle_form_submission();
+check($last_offset === 0, 'Explicit restart starts at zero.');
+echo "Backfill form cursor checks passed.\n";
